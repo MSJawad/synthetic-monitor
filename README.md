@@ -99,3 +99,19 @@ per-attempt deadline from `resolv.conf` (5 seconds by default). Each timed-out
 DNS probe left a goroutine and a socket behind for up to 5 seconds, which
 piles up against a dead nameserver. The resolver's dial function now closes
 the connection as soon as the lookup's context ends.
+
+### TLS checks fail before a certificate expires, not after
+
+A TLS check performs a full verified handshake, so an expired, untrusted or
+wrong-host certificate fails it as `tls`. A valid chain that expires within
+`min_days_remaining` (default 14) fails it as `cert_expiry`. That gives an
+alert while there is still time to act: automated renewal normally happens
+around 30 days before expiry, so a certificate with under 14 days left means
+renewal is broken.
+
+The expiry date is the earliest `NotAfter` of any certificate in the chain,
+not just the leaf, because an expired intermediate breaks verification just
+as an expired leaf does. If the server's certificate verifies through several
+chains (for example via a cross-signed intermediate), the connection keeps
+working while any of them is valid, so the check uses the chain that lasts
+longest.

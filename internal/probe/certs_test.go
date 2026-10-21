@@ -33,6 +33,15 @@ func newTestCA(t *testing.T) *testCA {
 	return ca
 }
 
+// intermediate returns a CA signed by ca that expires at notAfter.
+func (ca *testCA) intermediate(t *testing.T, notAfter time.Time) *testCA {
+	t.Helper()
+	inter := createCA(t, ca, notAfter)
+	inter.pool = ca.pool
+	inter.chain = append([][]byte{inter.cert.Raw}, ca.chain...)
+	return inter
+}
+
 func createCA(t *testing.T, parent *testCA, notAfter time.Time) *testCA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
