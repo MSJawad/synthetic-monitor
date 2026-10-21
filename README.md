@@ -115,3 +115,47 @@ as an expired leaf does. If the server's certificate verifies through several
 chains (for example via a cross-signed intermediate), the connection keeps
 working while any of them is valid, so the check uses the chain that lasts
 longest.
+
+### Scheduler: one goroutine per check, a shared limit on probes in flight
+
+Each check has its own goroutine with its own timer, and a semaphore caps the
+probes running at once across all checks. The alternative was a single timer
+heap feeding a fixed pool of workers, which scales to hundreds of thousands
+of checks with a constant number of goroutines. But it puts every check's
+schedule in one shared structure that reloads must edit under a lock. With
+one goroutine per check, stopping a check is cancelling its context, and a
+goroutine costs a few kilobytes, so even ten thousand checks are cheap. The
+benchmarks measure where this design stops being enough.
+
+Each check starts at a random point within its interval, so checks that
+share an interval do not all fire together after a start or reload. After
+that it keeps a fixed cadence: the next run is one interval after the
+previous run was *scheduled*, not after it finished, so probe duration does
+not make checks drift into alignment. A run that overruns its next slot (by
+waiting for a free slot under the concurrency limit) skips the missed slots
+instead of firing back to back, and a check never has two probes in flight.
+
+### Two kinds of stop: stop scheduling, and abort
+
+Stopping a check's schedule and cancelling its probe in flight are separate.
+When a check is removed or changed by a reload, or the service shuts down,
+its schedule stops but a probe already running finishes and its result is
+recorded; a changed check's replacement waits for that probe before its own
+first run. Probes are only aborted if shutdown's grace period runs out, and
+an aborted probe's result is discarded because it says nothing about the
+target.
+
+### Reloads change only what changed
+
+A new config is matched to the running one by check name. Unchanged checks
+keep running on their existing schedule, untouched. Changed checks are
+replaced, removed ones stop, and new ones start. An invalid config is
+rejected as a whole and the previous one stays in effect.
+
+### Deterministic time in tests
+
+Scheduler and config-watcher tests run inside `testing/synctest` bubbles,
+where time is simulated: a test covering five minutes of schedule finishes
+in milliseconds, assertions can demand exact intervals, and there are no
+sleeps to tune. The bubble also fails a test whose goroutines are still
+blocked when it ends, which complements goleak.

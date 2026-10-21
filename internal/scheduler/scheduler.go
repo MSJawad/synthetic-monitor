@@ -1,0 +1,232 @@
+// Package scheduler runs each check's probes on its interval, applies config
+// changes without disturbing unchanged checks, and lets probes in flight
+// finish when checks are removed or the service stops.
+package scheduler
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"math/rand/v2"
+	"reflect"
+	"sync"
+	"time"
+
+	"github.com/MSJawad/synthetic-monitor/internal/config"
+	"github.com/MSJawad/synthetic-monitor/internal/probe"
+)
+
+// Result is the outcome of one probe of a check.
+type Result struct {
+	Check string
+	Type  string
+	probe.Result
+}
+
+// Sink receives every completed probe. Record is called on the probing
+// goroutine, so it must return quickly.
+type Sink interface {
+	Record(Result)
+}
+
+// Options configures a Scheduler.
+type Options struct {
+	// MaxConcurrent caps the probes in flight at once across all checks.
+	MaxConcurrent int
+	// NewProber builds the prober for a check. Nil uses probe.New.
+	NewProber func(config.Check) probe.Prober
+	// Logger receives check changes and skipped runs. Nil discards them.
+	Logger *slog.Logger
+}
+
+// Scheduler runs one goroutine per check. Each check starts at a random
+// point within its interval, so checks sharing an interval do not fire in
+// lockstep, and then keeps a fixed cadence. A check never runs two probes at
+// once.
+//
+// Stopping is split in two. Stopping a check's schedule (when the check is
+// removed or changed, or the scheduler stops) prevents new probes but lets
+// one in flight finish and be recorded. Aborting cancels probes in flight;
+// it happens only when Stop's deadline expires.
+type Scheduler struct {
+	sink      Sink
+	newProber func(config.Check) probe.Prober
+	logger    *slog.Logger
+	slots     chan struct{} // one token per probe in flight
+
+	// scheduling ends when Stop is called; probes run under probing, which
+	// ends only if Stop's deadline expires.
+	scheduling, probing          context.Context
+	stopScheduling, abortProbing context.CancelFunc
+
+	mu      sync.Mutex
+	runners map[string]*runner
+	stopped bool
+	wg      sync.WaitGroup // every runner goroutine, including stopped ones still finishing a probe
+}
+
+// runner is the goroutine that schedules one check.
+type runner struct {
+	check  config.Check
+	prober probe.Prober
+	stop   context.CancelFunc // stops scheduling this check
+	done   chan struct{}      // closed once the goroutine has exited
+}
+
+// New returns a Scheduler that sends results to sink. Call Apply to start
+// checks.
+func New(sink Sink, opts Options) *Scheduler {
+	if opts.NewProber == nil {
+		opts.NewProber = func(c config.Check) probe.Prober { return probe.New(c, probe.Options{}) }
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+	s := &Scheduler{
+		sink:      sink,
+		newProber: opts.NewProber,
+		logger:    opts.Logger,
+		slots:     make(chan struct{}, max(opts.MaxConcurrent, 1)),
+		runners:   make(map[string]*runner),
+	}
+	s.scheduling, s.stopScheduling = context.WithCancel(context.Background())
+	s.probing, s.abortProbing = context.WithCancel(context.Background())
+	return s
+}
+
+// Apply makes the running checks match checks. Checks are matched by name:
+// unchanged ones keep running on their current schedule, removed ones stop
+// after any probe in flight, and changed ones are replaced by a new runner
+// that starts once the old one has finished. Apply does nothing after Stop.
+func (s *Scheduler) Apply(checks []config.Check) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return
+	}
+
+	want := make(map[string]config.Check, len(checks))
+	for _, c := range checks {
+		want[c.Name] = c
+	}
+	var added, updated, removed []string
+	replaced := make(map[string]<-chan struct{})
+	for name, r := range s.runners {
+		c, keep := want[name]
+		if keep && reflect.DeepEqual(c, r.check) {
+			delete(want, name)
+			continue
+		}
+		r.stop()
+		delete(s.runners, name)
+		if keep {
+			replaced[name] = r.done
+			updated = append(updated, name)
+		} else {
+			removed = append(removed, name)
+		}
+	}
+	for _, c := range checks {
+		if _, start := want[c.Name]; !start {
+			continue
+		}
+		if _, ok := replaced[c.Name]; !ok {
+			added = append(added, c.Name)
+		}
+		s.runners[c.Name] = s.start(c, replaced[c.Name])
+	}
+	s.logger.Info("checks applied", "added", added, "updated", updated, "removed", removed,
+		"unchanged", len(s.runners)-len(added)-len(updated))
+}
+
+// Stop stops scheduling probes and waits for those in flight to finish. If
+// ctx ends first, it aborts them, discards their results and returns an
+// error once they have returned.
+func (s *Scheduler) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	s.stopped = true
+	s.stopScheduling()
+	s.mu.Unlock()
+
+	finished := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(finished)
+	}()
+	defer s.abortProbing() // releases the context once every probe is done
+	select {
+	case <-finished:
+		return nil
+	case <-ctx.Done():
+		s.abortProbing()
+		<-finished
+		return fmt.Errorf("aborted probes still in flight: %w", ctx.Err())
+	}
+}
+
+// start launches a runner for c. If after is not nil, the runner waits for
+// it to close before scheduling, so a replaced check's last probe finishes
+// before its replacement's first one starts.
+func (s *Scheduler) start(c config.Check, after <-chan struct{}) *runner {
+	ctx, stop := context.WithCancel(s.scheduling)
+	r := &runner{check: c, prober: s.newProber(c), stop: stop, done: make(chan struct{})}
+	s.wg.Go(func() {
+		defer close(r.done)
+		defer stop()
+		if after != nil {
+			<-after
+		}
+		s.run(ctx, r)
+	})
+	return r
+}
+
+// run probes r's check on a fixed cadence until ctx ends.
+func (s *Scheduler) run(ctx context.Context, r *runner) {
+	interval := r.check.Interval
+	next := time.Now().Add(rand.N(interval)) //nolint:gosec // spreading load needs no unpredictability
+	timer := time.NewTimer(time.Until(next))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		s.runOnce(ctx, r)
+
+		// The next run is one interval after this run's scheduled time,
+		// not after it finished, so probe duration does not shift the
+		// cadence. A run delayed long enough (waiting for a free slot) to
+		// overrun later slots skips them rather than firing back to back.
+		next = next.Add(interval)
+		if now := time.Now(); !next.After(now) {
+			missed := now.Sub(next)/interval + 1
+			next = next.Add(missed * interval)
+			s.logger.Warn("skipped scheduled probes because an earlier one overran", "check", r.check.Name, "skipped", int64(missed))
+		}
+		timer.Reset(time.Until(next))
+	}
+}
+
+// runOnce runs one probe once a slot is free, unless ctx ends first, and
+// records the result.
+func (s *Scheduler) runOnce(ctx context.Context, r *runner) {
+	select {
+	case s.slots <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-s.slots }()
+	if ctx.Err() != nil {
+		return // stopped while a slot was being acquired
+	}
+
+	// Deliberately not ctx: stopping a check's schedule must not cancel its
+	// probe in flight. Only Stop's deadline aborts probes, via s.probing.
+	res := r.prober.Probe(s.probing) //nolint:contextcheck // see above
+	if res.Reason == probe.ReasonCanceled {
+		return // aborted at shutdown; says nothing about the target
+	}
+	s.sink.Record(Result{Check: r.check.Name, Type: r.check.Type(), Result: res})
+}
