@@ -270,6 +270,9 @@ body {
   border-bottom: 1px solid var(--hairline);
 }
 
+/* A fixed share for the time, so the result column starts at the same place
+   in every card, whatever the results say and whether there is a latency. */
+.probes th:first-child { width: 40%; }
 .probes .num { padding-right: 0; text-align: right; }
 .probes tr.failed td { font-weight: 600; }
 
