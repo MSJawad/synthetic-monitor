@@ -64,12 +64,12 @@ func TestDNSUnresponsiveServer(t *testing.T) {
 // returns its address. It answers A queries for names in records, answers
 // other query types for those names with no records, and returns NXDOMAIN
 // for every other name.
-func startFakeDNS(t *testing.T, records map[string]netip.Addr) string {
-	t.Helper()
+func startFakeDNS(tb testing.TB, records map[string]netip.Addr) string {
+	tb.Helper()
 	var lc net.ListenConfig
-	pc, err := lc.ListenPacket(t.Context(), "udp", "127.0.0.1:0")
+	pc, err := lc.ListenPacket(tb.Context(), "udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -85,7 +85,7 @@ func startFakeDNS(t *testing.T, records map[string]netip.Addr) string {
 			}
 		}
 	}()
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		_ = pc.Close()
 		<-done
 	})
