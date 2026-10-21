@@ -8,6 +8,8 @@ checks:
     slo:
       target: 99.5   # percent of probes that must succeed
       window_days: 30
+    failure_threshold: 3   # failed probes in a row before an alert
+    success_threshold: 2   # successful probes in a row before the recovery notice
     http:
       url: https://example.com/
       body_contains: Example Domain

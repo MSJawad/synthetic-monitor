@@ -24,6 +24,14 @@ go run ./cmd/synthetic-monitor -config examples/checks.yaml -log-level debug
 | `-shutdown-timeout` | `30s` | how long probes in flight get to finish after SIGTERM |
 | `-log-level` | `info` | `debug` also logs every successful probe |
 
+Alerts go to [ntfy](https://ntfy.sh), configured through the environment so the
+topic can live in a secret:
+
+| Variable | Purpose |
+|---|---|
+| `NTFY_URL` | topic to publish to, e.g. `https://ntfy.sh/<long-random-topic>`; without it, notifications are only logged |
+| `NTFY_TOKEN` | optional bearer token, for protected topics or self-hosted servers |
+
 Edits to the checks file are applied within one poll interval, or at once on
 `SIGHUP`. An invalid file is rejected and logged, and the previous checks keep
 running. On `SIGTERM` or Ctrl-C, `/readyz` turns unready, no new probes start,
@@ -58,6 +66,11 @@ Per-check series are labelled only with `check`; join on
 | `synthetic_config_last_reload_successful` | gauge | 0 while a rejected config is being ignored |
 | `synthetic_history_dropped_results_total` | counter | results not stored because the write queue was full |
 | `synthetic_history_write_errors_total` | counter | failed history writes |
+| `synthetic_alert_firing{check}` | gauge | 1 from the alert until the recovery notice |
+| `synthetic_notifications_delivered_total{kind}` | counter | notifications accepted by ntfy: `alert`, `recovery`, `removed` |
+| `synthetic_notification_delivery_failures_total{kind,permanent}` | counter | failed deliveries; `permanent="true"` ones were given up on |
+| `synthetic_notifications_pending` | gauge | notifications saved but not yet delivered |
+| `synthetic_alert_dropped_results_total` | counter | results not evaluated for alerting because its queue was full |
 
 Failure reasons: `timeout`, `dns`, `connect`, `tls`, `cert_expiry`,
 `http_status`, `http_body`, `dns_answer`, `latency`, `other`.
@@ -290,3 +303,55 @@ TCP series behind, frozen at their last value. When a check is removed, its
 series are deleted once its last probe has finished; deleting them at the
 moment of the reload would let that probe recreate them, stale for good.
 Failure reasons are a fixed set of ten, so label cardinality stays bounded.
+
+### One alert per incident: thresholds and a state machine
+
+Each check has a small state machine. `failure_threshold` failed probes in a
+row (default 3) raise one alert; failures after that add nothing.
+`success_threshold` successful probes in a row (default 2) then send one
+recovery notice, and a failure before that starts the count again. So a
+single blip pages nobody, and a target flapping between up and down stays in
+one alert instead of producing a stream of alerts and recoveries. The names
+match the Kubernetes probe fields with the same meaning. The transition
+logic is a pure function, tested by replaying sequences such as
+`FFFSFSFSFSS`.
+
+The trade-off of counting consecutive probes is that a target failing two
+probes in every three never alerts. That pattern shows up in the SLO and its
+error budget instead.
+
+### Notifications go through an outbox
+
+Each state change and the notification it calls for are saved to SQLite in
+one transaction. A separate goroutine delivers saved notifications oldest
+first, retrying with backoff (1 second, doubling to 5 minutes) until ntfy
+accepts each one, and deletes it only then. This is the transactional outbox
+pattern, and it rules out the failure modes of the obvious designs:
+
+- Saving the state, then sending: a crash in between records the alert as
+  sent when it never was, and it is lost for good.
+- Sending, then saving: a crash in between forgets the alert was sent, and
+  the next run sends it again.
+- Keeping state only in memory: every restart during an incident, such as a
+  deploy, would alert again, and a recovery after the restart would never be
+  announced.
+
+With the outbox, a restart mid-incident neither re-alerts nor loses the
+recovery, and notifications that could not be delivered (ntfy down, network
+partition) survive restarts and go out in order once it is reachable. One
+duplicate is still possible: if the process dies after ntfy accepts a
+notification but before it is deleted, it is sent again on the next start.
+Exactly-once delivery over a network is impossible without the receiver
+deduplicating, and ntfy does not; at-least-once is the right side to err on
+for alerts.
+
+Rate limiting and server errors are retried. Other rejections, such as a
+bad token, are permanent and dropped with an error log and metric, so one
+undeliverable notification cannot block every later one.
+
+### Removed checks resolve their alerts
+
+A check removed from the config while its alert is firing would otherwise
+never recover, leaving an incident open forever. Instead it gets a removal
+notice once its last probe has finished, including checks removed while the
+monitor was down, which are resolved at the next start.

@@ -20,6 +20,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/MSJawad/synthetic-monitor/internal/alert"
 	"github.com/MSJawad/synthetic-monitor/internal/config"
 	"github.com/MSJawad/synthetic-monitor/internal/store"
 )
@@ -88,6 +89,7 @@ func TestCheckRetention(t *testing.T) {
 // only through its logs, HTTP endpoints and history file, as an operator
 // would.
 func TestMonitor(t *testing.T) {
+	t.Parallel()
 	var holding atomic.Bool
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -133,7 +135,8 @@ func TestMonitor(t *testing.T) {
 	// Poll rarely so that reloads in this test happen only on SIGHUP.
 	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second,
 		retentionDays: 35, sloInterval: 50 * time.Millisecond}
-	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, reload: reload}
+	svc := &service{opts: o, logger: logger, watcher: watcher, history: history,
+		notifier: alert.LogNotifier{Logger: logger}, reload: reload}
 	done := make(chan error, 1)
 	go func() { done <- svc.serve(ctx, ln, cfg) }()
 

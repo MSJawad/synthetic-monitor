@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MSJawad/synthetic-monitor/internal/alert"
 	"github.com/MSJawad/synthetic-monitor/internal/config"
 	"github.com/MSJawad/synthetic-monitor/internal/metrics"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
@@ -93,6 +94,10 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err := checkRetention(cfg, o.retention()); err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	notifier, err := newNotifier(os.Getenv("NTFY_URL"), os.Getenv("NTFY_TOKEN"), logger)
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -114,8 +119,23 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, reload: reload}
+	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, notifier: notifier, reload: reload}
 	return svc.serve(ctx, ln, cfg)
+}
+
+// newNotifier returns the ntfy notifier for topicURL, or, if it is empty, a
+// notifier that only logs. Both settings come from the environment, so the
+// topic, which anyone who knows it can read, can be kept in a secret.
+func newNotifier(topicURL, token string, logger *slog.Logger) (alert.Notifier, error) {
+	if topicURL == "" {
+		logger.Warn("NTFY_URL is not set, so notifications will only be logged")
+		return alert.LogNotifier{Logger: logger}, nil
+	}
+	n, err := alert.NewNtfy(topicURL, token)
+	if err != nil {
+		return nil, fmt.Errorf("NTFY_URL: %w", err)
+	}
+	return n, nil
 }
 
 // checkRetention rejects SLO windows longer than the history kept, which
@@ -133,27 +153,38 @@ func checkRetention(cfg *config.Config, retention time.Duration) error {
 
 // service is the running monitor: what serve needs, opened by run.
 type service struct {
-	opts    options
-	logger  *slog.Logger
-	watcher *config.Watcher
-	history *store.Store
-	reload  <-chan os.Signal
+	opts     options
+	logger   *slog.Logger
+	watcher  *config.Watcher
+	history  *store.Store
+	notifier alert.Notifier
+	reload   <-chan os.Signal
 }
 
 // serve runs the monitor with cfg until ctx is cancelled, then shuts down in
 // an order that loses no results: report not ready, stop config reloads and
 // SLO evaluation, let probes in flight finish (aborting them if
-// shutdownTimeout runs out), write the queued history, and stop the HTTP
-// server last so health checks keep answering meanwhile.
+// shutdownTimeout runs out), evaluate their results for alerts and deliver
+// what they raise, write the queued history, and stop the HTTP server last
+// so health checks keep answering meanwhile.
 func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config) error {
 	logger := s.logger
 	m := metrics.New()
 	m.TrackHistory(s.history)
-	sched := scheduler.New(sinks{m, s.history, logSink{logger}}, scheduler.Options{
+	alerts, err := alert.New(ctx, s.history, cfg.Checks, alert.Options{
+		Notifier: s.notifier, Observer: m.AlertObserver(), Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
+	sched := scheduler.New(sinks{m, s.history, alerts, logSink{logger}}, scheduler.Options{
 		MaxConcurrent: s.opts.maxConcurrent,
 		Logger:        logger,
 		OnSkip:        m.Skipped,
-		OnRemoved:     m.Forget,
+		OnRemoved: func(check string) {
+			m.Forget(check)
+			alerts.Forget(check)
+		},
 	})
 	m.TrackInFlight(sched.InFlight)
 
@@ -161,6 +192,7 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	apply := func(cfg *config.Config) {
 		current.Store(cfg)
 		m.SetChecks(cfg.Checks)
+		alerts.SetChecks(cfg.Checks) // before probing starts, so new checks' thresholds are known
 		sched.Apply(cfg.Checks)
 		m.ConfigLoaded(true)
 	}
@@ -202,7 +234,6 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 			m.SetSLOStatus, logger)
 	})
 
-	var err error
 	select {
 	case err = <-serveErr:
 		err = fmt.Errorf("http server: %w", err)
@@ -219,6 +250,9 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	defer cancel()
 	if stopErr := sched.Stop(shutdownCtx); stopErr != nil {
 		logger.Warn("shutdown deadline reached", "err", stopErr)
+	}
+	if closeErr := alerts.Close(shutdownCtx); closeErr != nil {
+		logger.Warn("shutdown deadline reached", "err", closeErr)
 	}
 	if closeErr := s.history.Close(shutdownCtx); closeErr != nil {
 		err = errors.Join(err, fmt.Errorf("closing history: %w", closeErr))
