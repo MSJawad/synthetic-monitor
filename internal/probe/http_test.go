@@ -107,6 +107,22 @@ func TestHTTPMaxLatency(t *testing.T) {
 	wantReason(t, r, ReasonLatency)
 }
 
+func TestHTTPTruncatedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Promise 100 bytes, send 7, then drop the connection.
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			panic(err)
+		}
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	wantReason(t, run(t, config.Check{HTTP: &config.HTTP{URL: srv.URL}}, Options{}), ReasonOther)
+}
+
 func TestHTTPConnectionRefused(t *testing.T) {
 	wantReason(t, run(t, config.Check{HTTP: &config.HTTP{URL: "http://" + closedPort(t)}}, Options{}), ReasonConnect)
 }
