@@ -65,6 +65,14 @@
         "labels": {"type": "object", "additionalProperties": {"type": "string"}}
       }
     },
+    "grafanaDashboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
     "resources": {"type": "object"},
     "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
     "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},

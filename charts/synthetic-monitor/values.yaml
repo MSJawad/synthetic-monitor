@@ -46,6 +46,13 @@ serviceMonitor:
   interval: 30s
   labels: {}
 
+# The Grafana dashboard as a ConfigMap, for Grafana's dashboard sidecar
+# (enabled in kube-prometheus-stack), which loads ConfigMaps with this label.
+grafanaDashboard:
+  enabled: false
+  labels:
+    grafana_dashboard: "1"
+
 # No CPU limit: CPU throttling would delay probes and show up as latency of
 # the targets.
 resources:
