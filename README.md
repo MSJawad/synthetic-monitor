@@ -99,6 +99,48 @@ Per-check series are labelled only with `check`; join on
 Failure reasons: `timeout`, `dns`, `connect`, `tls`, `cert_expiry`,
 `http_status`, `http_body`, `dns_answer`, `latency`, `other`.
 
+## Deploying
+
+CI builds an image for arm64 and amd64 from every commit on `main` and pushes
+it to `ghcr.io/msjawad/synthetic-monitor`, tagged with the commit SHA. The
+Helm chart in [`charts/synthetic-monitor`](charts/synthetic-monitor) runs it
+as a single pod, with the history on a persistent volume.
+
+```sh
+kubectl create namespace synthmon
+# Anyone who knows an ntfy topic can read it, so it is kept in a Secret.
+kubectl -n synthmon create secret generic ntfy --from-literal=NTFY_URL=https://ntfy.sh/<long-random-topic>
+helm install synthetic-monitor charts/synthetic-monitor -n synthmon \
+  --set image.tag=<commit SHA> --set ntfy.existingSecret=ntfy -f examples/checks.yaml
+```
+
+A checks file is also a values file: both keep the checks under `checks:`.
+To change the checks, run `helm upgrade` with the edited file; the pod
+applies them within about a minute, without restarting. Every setting is
+described in [`values.yaml`](charts/synthetic-monitor/values.yaml), and
+misspelled ones are rejected.
+
+- **Private image:** while the GHCR package is private, the cluster needs a
+  pull secret: a `docker-registry` Secret holding a token that can read
+  packages, passed as `--set imagePullSecrets[0].name=<secret>`.
+- **Prometheus and Grafana:** with
+  [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack),
+  `--set serviceMonitor.enabled=true --set serviceMonitor.labels.release=<its release name>`
+  has Prometheus scrape the monitor, and `--set grafanaDashboard.enabled=true`
+  loads the dashboard into Grafana. Otherwise, import
+  [`synthetic-monitor.json`](charts/synthetic-monitor/dashboards/synthetic-monitor.json)
+  into Grafana by hand.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/grafana-dashboard-dark.png">
+  <img src="docs/images/grafana-dashboard-light.png" width="720"
+       alt="The Grafana dashboard during a test outage: summary numbers, a timeline in which two checks go from up to failing, down and recovering and back to up, SLO and certificate tables, a small latency chart per check, stacked HTTP phase timings, and the monitor's own health.">
+</picture>
+
+The dashboard during a test outage on a local cluster: the demo app behind
+two checks was stopped for about two minutes, and each check went from up to
+failing, down (alert sent), recovering and up again (recovery sent).
+
 ## Performance
 
 Measured on an Apple M1 (8 cores), on macOS and on Linux arm64 (the
@@ -144,6 +186,18 @@ Requires Go 1.27.3 or later.
 ```sh
 go test -race ./...
 golangci-lint run
+```
+
+To try the chart on a local [k3d](https://k3d.io) cluster, without a
+registry:
+
+```sh
+k3d cluster create synthmon
+docker build -t synthetic-monitor:dev .
+k3d image import synthetic-monitor:dev -c synthmon
+helm install synthetic-monitor charts/synthetic-monitor -n synthmon --create-namespace \
+  --set image.repository=synthetic-monitor --set image.tag=dev --set image.pullPolicy=Never \
+  -f examples/checks.yaml
 ```
 
 ## Decisions
@@ -448,3 +502,117 @@ A few details that are easy to get wrong:
 - Colours come from a palette validated for colour-vision deficiency in both
   light and dark mode, and status colours always come with an icon and a
   label, never colour alone.
+
+### The image: a static binary on distroless
+
+The Dockerfile compiles on the build machine's own architecture and
+cross-compiles for the target (`GOARCH`), so the arm64 image builds on an
+amd64 CI runner without emulating arm64 in QEMU, which would be several
+times slower. That works because the binary has no C dependencies, thanks
+to the pure-Go SQLite driver.
+
+The runtime image is `distroless/static`: the binary, CA certificates (which
+HTTPS and TLS probes need), timezone data and a non-root user, and no shell
+or package manager. It is about 18 MB, 7 MB compressed, and there is little
+in it for a vulnerability scanner to flag or an attacker to use. The user is set as a
+number (`65532`), because Kubernetes can only enforce `runAsNonRoot` when it
+can see the UID without reading the image's `/etc/passwd`. Base images are
+pinned by digest, for the same reason actions are pinned to SHAs.
+
+### One pod, replaced rather than rolled
+
+The history and the alert state live in one SQLite file with one writer, so
+the chart runs exactly one replica with the `Recreate` strategy: during an
+upgrade the old pod stops before the new one starts. A rolling update would
+briefly run two monitors, each probing and alerting on its own, and both
+writing the same database. The cost is a gap of a few seconds without probes
+during an upgrade. Running several replicas would need leader election, or
+a shared database and a way to agree on who sends each alert, which is far
+more machinery than a monitor of this size warrants.
+
+The volume has `helm.sh/resource-policy: keep`, so uninstalling the chart
+does not delete 30 days of history; installing the same release again picks
+it up.
+
+### Checks change without a restart
+
+The checks are a ConfigMap mounted as a directory. The kubelet updates such
+a mount in place when the ConfigMap changes (by swapping a symlink, usually
+within a minute), and the monitor's poll picks the change up and applies only
+what changed, so probes in flight finish and unchanged checks keep their
+schedules. Two common patterns would defeat this: a `subPath` mount, which is
+a copy made when the pod starts and never updated, and a `checksum/config`
+annotation on the pod, which restarts the pod on every change. The chart uses
+neither.
+
+### Pod resources: a memory limit but no CPU limit
+
+A CPU limit makes the kernel throttle the container once it uses its share
+of a 100 ms period. A probe that is throttled mid-request takes longer, and
+the monitor would report that delay as the target's latency. So the pod
+requests a little CPU and has no limit. Memory has a limit, because memory
+cannot be throttled, only exhausted: a leak should get this pod restarted,
+not starve the rest of the node.
+
+### Shutdown fits inside Kubernetes' grace period
+
+When Kubernetes stops a pod it sends SIGTERM, waits
+`terminationGracePeriodSeconds`, then kills it. The monitor gives probes in
+flight `-shutdown-timeout` to finish and then up to 5 seconds to write their
+results and notifications, so the chart sets the grace period 10 seconds
+above the shutdown timeout, derived from the same value so the two cannot
+drift apart.
+
+### A pod that can do little besides probing
+
+The container runs as a non-root user with a read-only root filesystem, no
+Linux capabilities, no privilege escalation and the runtime's default
+seccomp profile. It gets no Kubernetes API token, because it never calls the
+API. The only writable places are the history volume and a small `/tmp` for
+SQLite's temporary files.
+
+### Secrets are referenced, never passed as values
+
+The chart takes the name of an existing Secret for the ntfy settings rather
+than the values themselves. Values files tend to end up in Git, and Helm
+stores every release's values in the cluster, so a topic passed as a value
+would leak in both places.
+
+### Chart values are validated
+
+Helm ignores values it does not recognise, so a typo such as
+`serviceMonitor.enable: true` would silently do nothing. The chart's
+`values.schema.json` rejects unknown and mistyped values when installing,
+in the same spirit as the strict checks file. The checks themselves are left
+to the monitor to validate, so there is one set of rules, not two that could
+disagree.
+
+### Images built per commit, with plain docker commands
+
+CI publishes an image for every commit on `main`, tagged with the commit SHA
+and never `latest`: a tag that always means the same image makes a
+deployment reproducible and a rollback a matter of naming the previous SHA.
+The workflow calls `docker buildx` directly instead of using the
+docker/*-action wrappers, which keeps third-party code away from the job
+that holds a token able to push packages; its BuildKit image is pinned by
+digest. After pushing, the job reads the image back from the registry and
+checks that it holds both platforms.
+
+### The dashboard: one chart per check, states as the status page names them
+
+Latency gets a small chart per check rather than one chart with a line per
+check. Checks differ by orders of magnitude (a 4 ms TCP connect beside an
+8-second HTTP request), so a shared axis flattens all but one of them, and
+more than a handful of lines would need more colours than can be told apart.
+The charts show the mean, computed exactly from the histogram's sum and
+count: with a few probes a minute per check, a percentile estimated from
+histogram buckets would mostly report where the bucket boundaries are.
+
+The state timeline combines two metrics into the status page's four states:
+`2 * alert_firing + 1 - probe_success` is 0 when up, 1 when failing below the
+alert threshold, 3 when down and 2 when recovering. Failing and recovering
+share a colour, as on the status page; they are told apart by their labels
+and by always coming before and after "down". An overspent error budget
+reads "Used up" rather than a percentage such as -981%, and every status
+colour starts at an explicit value, so a panel with no data is never coloured
+as if it were healthy or failing.
