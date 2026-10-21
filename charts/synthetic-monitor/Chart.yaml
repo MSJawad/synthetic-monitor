@@ -1,0 +1,8 @@
+apiVersion: v2
+name: synthetic-monitor
+description: Probes HTTP(S), TCP, DNS and TLS endpoints, tracks SLOs and sends alerts.
+type: application
+version: 0.1.0
+home: https://github.com/MSJawad/synthetic-monitor
+sources:
+  - https://github.com/MSJawad/synthetic-monitor

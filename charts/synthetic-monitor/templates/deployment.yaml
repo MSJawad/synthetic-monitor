@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "synthetic-monitor.fullname" . }}
+  labels:
+    {{- include "synthetic-monitor.labels" . | nindent 4 }}
+spec:
+  # One writer for the SQLite history and alert state: never two pods, not
+  # even briefly during a rollout, so the old pod stops before the new starts.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "synthetic-monitor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "synthetic-monitor.labels" . | nindent 8 }}
+      # Deliberately no checksum of the ConfigMap here: that would restart
+      # the pod on every change to the checks, which it reloads by itself.
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The monitor never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      # Probes in flight get the shutdown timeout, then writing their results
+      # gets up to 5 seconds; the rest is margin, so Kubernetes never kills
+      # the monitor before it has finished.
+      terminationGracePeriodSeconds: {{ add .Values.monitor.shutdownTimeoutSeconds 10 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: monitor
+          image: "{{ .Values.image.repository }}:{{ required "image.tag is required: the commit SHA of the image to run" .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - -config=/etc/synthetic-monitor/checks.yaml
+            - -history=/data/history.db
+            - -listen=:8080
+            - -log-level={{ .Values.monitor.logLevel }}
+            - -max-concurrent-probes={{ .Values.monitor.maxConcurrentProbes }}
+            - -history-retention-days={{ .Values.monitor.historyRetentionDays }}
+            - -config-poll-interval={{ .Values.monitor.configPollInterval }}
+            - -shutdown-timeout={{ .Values.monitor.shutdownTimeoutSeconds }}s
+          {{- with .Values.ntfy.existingSecret }}
+          env:
+            - name: NTFY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: NTFY_URL
+            - name: NTFY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: NTFY_TOKEN
+                  optional: true
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # The whole directory, not a subPath: a subPath mount is a copy
+            # made at start and never sees later edits to the ConfigMap.
+            - name: config
+              mountPath: /etc/synthetic-monitor
+              readOnly: true
+            - name: data
+              mountPath: /data
+            # SQLite's temporary files; the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "synthetic-monitor.fullname" . }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "synthetic-monitor.fullname" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

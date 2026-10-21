@@ -1,0 +1,61 @@
+image:
+  repository: ghcr.io/msjawad/synthetic-monitor
+  # Required: the commit SHA of the image to run. CI tags every image it
+  # pushes from main with its commit SHA; there is no "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Pull secrets for a private registry, e.g. [{name: ghcr}].
+imagePullSecrets: []
+
+# The checks to run, in the format of examples/checks.yaml. Edits reach the
+# running pod without a restart: the kubelet updates the mounted ConfigMap,
+# usually within a minute, and the monitor applies it on its next poll.
+checks: []
+
+ntfy:
+  # Name of an existing Secret holding NTFY_URL and, optionally, NTFY_TOKEN.
+  # Without one, notifications are only logged.
+  existingSecret: ""
+
+monitor:
+  logLevel: info
+  maxConcurrentProbes: 64
+  # Must cover the longest SLO window among the checks.
+  historyRetentionDays: 35
+  configPollInterval: 5s
+  # How long probes in flight get to finish when the pod stops. The pod's
+  # termination grace period is set 10 seconds longer.
+  shutdownTimeoutSeconds: 30
+
+# Holds probe history and alert state, so a restart neither forgets an
+# incident nor resets the SLOs.
+persistence:
+  # Empty uses the cluster's default storage class (local-path on k3s).
+  storageClassName: ""
+  size: 1Gi
+
+service:
+  port: 80
+
+# Prometheus Operator scrape config. kube-prometheus-stack only selects
+# ServiceMonitors labelled with its release name, e.g.
+# labels: {release: kube-prometheus-stack}.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+# No CPU limit: CPU throttling would delay probes and show up as latency of
+# the targets.
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
