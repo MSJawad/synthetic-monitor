@@ -185,3 +185,45 @@ where time is simulated: a test covering five minutes of schedule finishes
 in milliseconds, assertions can demand exact intervals, and there are no
 sleeps to tune. The bubble also fails a test whose goroutines are still
 blocked when it ends, which complements goleak.
+
+### History in SQLite, not Postgres or a time-series database
+
+Every probe result is kept for the retention period (35 days by default) in
+an embedded SQLite database: it is what the status page shows and what SLOs
+are computed from.
+
+The scale decides it. Twenty checks every 30 seconds is under one write a
+second and about 1.7 million rows a month, a few hundred megabytes. The
+writer benchmarks at around 170,000 results a second, so SQLite has five
+orders of magnitude of headroom here.
+
+- **Postgres** would be another service to deploy, upgrade, back up and keep
+  healthy, plus a network hop and credentials, for data that only this one
+  process reads and writes. Its strengths (concurrent writers, a query
+  planner for many users, replication) solve problems this service does
+  not have. It becomes the right choice if several monitor instances must
+  share one history.
+- **A time-series database**, Prometheus included, is built for numeric
+  samples at regular intervals, not for individual events carrying a failure
+  reason and error text. Computing SLOs from Prometheus would also make the
+  status page depend on another system being up (a monitor's status page
+  should not), and Prometheus' default 15-day retention is shorter than a
+  30-day SLO window. Prometheus still gets every metric for dashboards; it
+  just is not the system of record.
+
+The driver is `modernc.org/sqlite`, SQLite translated to pure Go. It is
+slower than the cgo-based `mattn/go-sqlite3`, which does not matter at under
+one write a second, and in exchange the binary builds with `CGO_ENABLED=0`:
+it cross-compiles to arm64 without a C toolchain and runs on a distroless
+image with no libc.
+
+### Probes never wait for the disk
+
+A single goroutine owns all writes and batches them into transactions.
+Recording a result only puts it on a bounded queue; if the queue is ever
+full (the disk has stalled), the result is dropped and counted in
+`synthetic_history_dropped_results_total` rather than blocking. Blocking
+would stall probes, distort their timings and turn a disk problem into
+false alerts about the targets. WAL mode lets the status page read while
+the writer writes, and old results are deleted in small chunks so pruning
+never holds the write lock for long.
