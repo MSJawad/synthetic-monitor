@@ -1,0 +1,59 @@
+# Checks for a typical web app: an API, a sign-in, a background worker and
+# the certificate in front of them. Secrets come from the environment as
+# ${NAME}; the monitor refuses to start if any of them is unset or empty.
+#
+#   PROBE_EMAIL, PROBE_PASSWORD  a dedicated account for the sign-in check
+#   METRICS_KEY                  the app's key for /metrics
+#   HEARTBEAT_TOKEN              the token the worker sends with its pings
+checks:
+  # Readiness, which fails while the app's database or cache is down.
+  - name: api-ready
+    interval: 30s
+    max_latency: 2s
+    slo: {target: 99.9}
+    http:
+      url: https://api.example.com/ready
+
+  # A header carrying a secret: never put one in the URL, which appears in
+  # errors and so in logs and alerts.
+  - name: api-metrics
+    interval: 1m
+    http:
+      url: https://api.example.com/metrics
+      headers: {X-Metrics-Key: "${METRICS_KEY}"}
+      body_contains: process_cpu_seconds_total
+
+  # Sign in, then use the session: each run starts with no cookies, as a
+  # new visitor would.
+  - name: sign-in
+    interval: 5m
+    timeout: 20s
+    failure_threshold: 2
+    steps:
+      - name: sign in
+        method: POST
+        url: https://api.example.com/auth/signin
+        headers: {Content-Type: application/json}
+        body: '{"email": "${PROBE_EMAIL}", "password": "${PROBE_PASSWORD}"}'
+        extract: {token: data.token}
+      - name: profile
+        url: https://api.example.com/auth/me
+        headers: {Authorization: "Bearer ${token}"}
+        body_contains: '"email"'
+
+  # The worker's hourly job runs POST /heartbeat/billing-job with
+  # "Authorization: Bearer $HEARTBEAT_TOKEN" when it finishes. The check
+  # fails if no ping arrives for an hour plus six minutes of grace.
+  - name: billing-job
+    interval: 1m
+    failure_threshold: 1
+    heartbeat: {every: 1h}
+
+  # Certificates renew automatically, until the DNS record that proves
+  # ownership is deleted. Renewal starts 60 days ahead, so 45 days left
+  # means it has stalled, with weeks to spare.
+  - name: api-cert
+    interval: 6h
+    tls:
+      address: api.example.com:443
+      min_days_remaining: 45

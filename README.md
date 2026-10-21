@@ -1,9 +1,10 @@
 # synthetic-monitor
 
 A synthetic monitoring service in Go. It probes HTTP(S), TCP, DNS and TLS
-endpoints on a schedule, records availability and latency, tracks SLOs and
-error budgets, and sends a webhook alert when a check breaks and a notice when
-it recovers.
+endpoints on a schedule, runs multi-step journeys such as signing in, and
+listens for heartbeats from jobs it cannot reach. It records availability and
+latency, tracks SLOs and error budgets, and sends a webhook alert when a check
+breaks and a notice when it recovers.
 
 Status: v1 in progress.
 
@@ -25,6 +26,26 @@ On a phone, with a check's recent probes expanded:
 
 The screenshots show demo checks against a local target made to fail on
 purpose. The page follows the viewer's light or dark preference.
+
+## Checks
+
+Each check in the checks file has a name, an interval and one type:
+
+| Type | Passes when | Example |
+|---|---|---|
+| `http` | a request gets an expected status, and optionally a body containing some text, within the timeout; it can send a method, headers and a body | a health endpoint |
+| `steps` | a sequence of HTTP requests all pass, sharing cookies and values extracted from JSON responses | sign in, then fetch a page as that user |
+| `tcp` | a TCP connection opens | a database port |
+| `dns` | a name resolves, optionally to expected addresses | a domain at its DNS provider |
+| `tls` | a certificate chain verifies and has at least `min_days_remaining` days left | the certificate in front of an API |
+| `heartbeat` | something pinged `POST /heartbeat/{name}` within the last period plus grace | a cron job that should run every hour |
+
+Any check can also fail for being slower than `max_latency`, and can have an
+SLO. Header values and bodies can refer to environment variables as
+`${NAME}`, which keeps secrets out of the file.
+[`examples/checks.yaml`](examples/checks.yaml) runs against public endpoints;
+[`examples/app-checks.yaml`](examples/app-checks.yaml) shows each type for a
+typical web app.
 
 ## Running
 

@@ -337,9 +337,30 @@ checks:
 	}
 }
 
-func TestExampleConfigIsValid(t *testing.T) {
+func TestExampleConfigsAreValid(t *testing.T) {
 	if _, _, err := NewWatcher("../../examples/checks.yaml", noEnv); err != nil {
 		t.Fatalf("examples/checks.yaml: %v", err)
+	}
+	// The secrets app-checks.yaml documents, and only those.
+	env := func(name string) (string, bool) {
+		switch name {
+		case "PROBE_EMAIL", "PROBE_PASSWORD", "METRICS_KEY":
+			return "x", true
+		}
+		return "", false
+	}
+	_, cfg, err := NewWatcher("../../examples/app-checks.yaml", env)
+	if err != nil {
+		t.Fatalf("examples/app-checks.yaml: %v", err)
+	}
+	types := make(map[string]bool)
+	for _, c := range cfg.Checks {
+		types[c.Type()] = true
+	}
+	for _, want := range []string{"http", "steps", "heartbeat", "tls"} {
+		if !types[want] {
+			t.Errorf("examples/app-checks.yaml has no %s check", want)
+		}
 	}
 }
 
