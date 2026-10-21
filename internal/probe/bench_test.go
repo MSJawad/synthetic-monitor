@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,9 +17,12 @@ import (
 
 // BenchmarkProbe runs each probe type against a server on the same machine,
 // 64 probes at a time, the service's default -max-concurrent-probes.
-// probes/s is the throughput one machine sustains for that type, including
-// the server's share of the work, and allocs/op shows the garbage each
-// probe creates. Run it with a fixed count:
+// cpu-µs/probe is the process's CPU time per probe, including the server's
+// share of the work: the figure that decides how many probes a machine can
+// run (cores ÷ CPU per probe). allocs/op shows the garbage each probe
+// creates. probes/s is wall-clock throughput, which an occasional dropped
+// SYN, resent after a second, can distort; CPU time does not count that
+// wait. Run it with a fixed count:
 //
 //	go test -run '^$' -bench BenchmarkProbe -benchtime 5000x ./internal/probe
 //
@@ -28,7 +33,13 @@ import (
 // for the whole machine, so a longer benchmark runs out of local ports
 // ("can't assign requested address") long before it runs out of CPU.
 // 5000 probes per type stays inside that limit.
+//
+// Each case first sends one burst of probes before the timer starts, since
+// on Linux the opening burst of connections to a server that has not
+// accepted any yet tends to overflow its accept queue (TcpExt
+// ListenOverflows) and wait out that one-second retransmission.
 func BenchmarkProbe(b *testing.B) {
+	const inFlight = 64
 	ca := newTestCA(b)
 	cert := ca.validFor(b, 90*24*time.Hour, "127.0.0.1", "app.test")
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
@@ -51,8 +62,15 @@ func BenchmarkProbe(b *testing.B) {
 		b.Run(c.name, func(b *testing.B) {
 			c.check.Name, c.check.Interval, c.check.Timeout = "bench", time.Minute, 10*time.Second
 			p := New(c.check, Options{RootCAs: ca.pool})
+			var warm sync.WaitGroup
+			for range inFlight {
+				warm.Go(func() { p.Probe(b.Context()) })
+			}
+			warm.Wait()
+			b.ResetTimer()
+			cpuBefore := cpuTime(b)
 			b.ReportAllocs()
-			b.SetParallelism(max(1, 64/runtime.GOMAXPROCS(0)))
+			b.SetParallelism(max(1, inFlight/runtime.GOMAXPROCS(0)))
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
 					if r := p.Probe(b.Context()); !r.OK() {
@@ -62,6 +80,17 @@ func BenchmarkProbe(b *testing.B) {
 				}
 			})
 			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "probes/s")
+			b.ReportMetric(float64(cpuTime(b)-cpuBefore)/float64(time.Microsecond)/float64(b.N), "cpu-µs/probe")
 		})
 	}
+}
+
+// cpuTime returns the user and system CPU time the process has used.
+func cpuTime(b *testing.B) time.Duration {
+	b.Helper()
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		b.Fatal(err)
+	}
+	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
 }
