@@ -28,6 +28,33 @@ func TestHTTPSuccess(t *testing.T) {
 	}
 }
 
+func TestHTTPSendsMethodHeadersAndBody(t *testing.T) {
+	type seen struct{ method, host, key, contentType, body string }
+	got := make(chan seen, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got <- seen{r.Method, r.Host, r.Header.Get("X-Key"), r.Header.Get("Content-Type"), string(body)}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	env := func(name string) (string, bool) { return map[string]string{"KEY": "s3cr3t"}[name], name == "KEY" }
+	r := run(t, config.Check{HTTP: &config.HTTP{
+		URL: srv.URL, Method: http.MethodPost,
+		Headers: map[string]string{"X-Key": "${KEY}", "Content-Type": "application/json", "Host": "api.example"},
+		Body:    `{"password":"${KEY}"}`,
+	}}, Options{Env: env})
+
+	want := seen{http.MethodPost, "api.example", "s3cr3t", "application/json", `{"password":"s3cr3t"}`}
+	if s := <-got; s != want {
+		t.Errorf("server saw %+v, want %+v", s, want)
+	}
+	wantReason(t, r, ReasonHTTPStatus)
+	if strings.Contains(r.Err.Error(), "s3cr3t") {
+		t.Errorf("error %q reveals the secret", r.Err)
+	}
+}
+
 func TestHTTPStatus(t *testing.T) {
 	tests := []struct {
 		name   string

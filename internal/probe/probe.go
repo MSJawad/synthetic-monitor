@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/MSJawad/synthetic-monitor/internal/config"
@@ -58,12 +59,28 @@ type Prober interface {
 	Probe(ctx context.Context) Result
 }
 
-// Options changes how probers verify servers. The zero value suits
-// production.
+// Options changes how probers verify servers and where they find
+// variables. The zero value suits production.
 type Options struct {
 	// RootCAs verifies server certificates. Nil uses the system roots; tests
 	// set it to trust their own certificate authority.
 	RootCAs *x509.CertPool
+	// Env supplies the variables request templates refer to. Nil uses the
+	// process environment.
+	Env config.Env
+}
+
+// lookupEnv returns a lookup of variables in the environment, for
+// config.Expand.
+func (o Options) lookupEnv() func(name string) string {
+	env := o.Env
+	if env == nil {
+		env = os.LookupEnv
+	}
+	return func(name string) string {
+		v, _ := env(name)
+		return v
+	}
 }
 
 // New returns the prober for check c, which must have passed config

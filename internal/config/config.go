@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -85,9 +88,15 @@ func (s SLO) Window() time.Duration {
 	return time.Duration(s.WindowDays) * 24 * time.Hour
 }
 
-// HTTP checks that a GET request to URL succeeds.
+// HTTP checks that a request to URL succeeds.
 type HTTP struct {
 	URL string `yaml:"url"`
+	// Method defaults to GET.
+	Method string `yaml:"method"`
+	// Headers and Body are templates (see Expand), so they can carry
+	// secrets from the environment. A Host header sets the request's host.
+	Headers map[string]string `yaml:"headers"`
+	Body    string            `yaml:"body"`
 	// ExpectStatus lists acceptable status codes. Empty accepts any 2xx.
 	ExpectStatus []int `yaml:"expect_status"`
 	// BodyContains, if set, must appear in the response body.
@@ -135,10 +144,11 @@ func (c Check) Type() string {
 	return ""
 }
 
-// Parse decodes a config, applies defaults and validates it. Unknown fields
-// are errors, so a misspelt option fails loudly instead of being ignored.
-// All validation problems are reported together.
-func Parse(data []byte) (*Config, error) {
+// Parse decodes a config, applies defaults and validates it, looking up
+// the variables that templates refer to in env. Unknown fields are errors,
+// so a misspelt option fails loudly instead of being ignored. All
+// validation problems are reported together.
+func Parse(data []byte, env Env) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg Config
@@ -151,7 +161,7 @@ func Parse(data []byte) (*Config, error) {
 	for i := range cfg.Checks {
 		cfg.Checks[i].applyDefaults()
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(env); err != nil {
 		return nil, err
 	}
 	sum := sha256.Sum256(data)
@@ -175,6 +185,9 @@ func (c *Check) applyDefaults() {
 	if c.SLO != nil && c.SLO.WindowDays == 0 {
 		c.SLO.WindowDays = DefaultSLOWindowDays
 	}
+	if c.HTTP != nil {
+		c.HTTP.applyDefaults()
+	}
 	if c.DNS != nil && c.DNS.Server != "" {
 		if _, _, err := net.SplitHostPort(c.DNS.Server); err != nil {
 			c.DNS.Server = net.JoinHostPort(c.DNS.Server, "53")
@@ -190,10 +203,17 @@ func (c *Check) applyDefaults() {
 	}
 }
 
+func (h *HTTP) applyDefaults() {
+	if h.Method == "" {
+		h.Method = http.MethodGet
+	}
+	h.Method = strings.ToUpper(h.Method)
+}
+
 // validName keeps names safe to use in URLs, metric labels and log lines.
 var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-func (cfg *Config) validate() error {
+func (cfg *Config) validate(env Env) error {
 	var errs []error
 	seen := make(map[string]bool)
 	for i, c := range cfg.Checks {
@@ -247,14 +267,8 @@ func (cfg *Config) validate() error {
 
 		switch {
 		case c.HTTP != nil:
-			u, err := url.Parse(c.HTTP.URL)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-				fail("http.url %q must be an absolute http or https URL", c.HTTP.URL)
-			}
-			for _, code := range c.HTTP.ExpectStatus {
-				if code < 100 || code > 599 {
-					fail("http.expect_status %d is not a valid HTTP status code", code)
-				}
+			for _, err := range c.HTTP.validate(envVars(env)) {
+				fail("http.%v", err)
 			}
 		case c.TCP != nil:
 			if err := checkHostPort(c.TCP.Address); err != nil {
@@ -279,6 +293,101 @@ func (cfg *Config) validate() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// methods are the HTTP methods a request may use.
+var methods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodOptions,
+}
+
+// validate returns the problems with h, each starting with the field it
+// concerns. checkVar reports why a variable a template refers to cannot be
+// used, or nil if it can.
+func (h *HTTP) validate(checkVar func(name string) error) []error {
+	var errs []error
+	fail := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
+	template := func(field, s string) {
+		names, err := templateRefs(s)
+		if err != nil {
+			fail("%s: %v", field, err)
+			return
+		}
+		for _, name := range names {
+			if err := checkVar(name); err != nil {
+				fail("%s refers to ${%s}, %v", field, name, err)
+			}
+		}
+	}
+
+	u, err := url.Parse(h.URL)
+	switch {
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+		fail("url %q must be an absolute http or https URL", h.URL)
+	case strings.Contains(h.URL, "${"):
+		// URLs appear in error messages, and so in logs and notifications.
+		fail("url must not contain variables: send secrets in headers or the body")
+	}
+	if !slices.Contains(methods, h.Method) {
+		fail("method %q must be one of %s", h.Method, strings.Join(methods, ", "))
+	}
+	canonical := make(map[string]string)
+	for name, value := range h.Headers {
+		field := fmt.Sprintf("headers[%q]", name)
+		if !validHeaderName(name) {
+			fail("%s is not a valid header name", field)
+			continue
+		}
+		if prev, dup := canonical[http.CanonicalHeaderKey(name)]; dup {
+			fail("%s and headers[%q] are the same header", field, prev)
+		}
+		canonical[http.CanonicalHeaderKey(name)] = name
+		if strings.ContainsAny(value, "\r\n") {
+			fail("%s must be a single line", field)
+		}
+		template(field, value)
+	}
+	template("body", h.Body)
+	for _, code := range h.ExpectStatus {
+		if code < 100 || code > 599 {
+			fail("expect_status %d is not a valid HTTP status code", code)
+		}
+	}
+	return errs
+}
+
+// envVars returns a checkVar for HTTP.validate that accepts environment
+// variables that are set, non-empty and a single line. An empty secret is
+// almost always a deployment mistake, so it is caught here rather than
+// sent. Values are never quoted in errors: they may be secrets.
+func envVars(env Env) func(name string) error {
+	return func(name string) error {
+		v, ok := env(name)
+		switch {
+		case !ok:
+			return errors.New("which is not set in the environment")
+		case v == "":
+			return errors.New("which is empty in the environment")
+		case strings.ContainsAny(v, "\r\n"):
+			return errors.New("whose value spans several lines")
+		}
+		return nil
+	}
+}
+
+// validHeaderName reports whether name is an HTTP header field name: one
+// or more token characters (RFC 9110, section 5.6.2).
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		letterOrDigit := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+		if !letterOrDigit && !strings.ContainsRune("!#$%&'*+-.^_`|~", c) {
+			return false
+		}
+	}
+	return true
 }
 
 func checkHostPort(address string) error {

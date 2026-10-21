@@ -17,22 +17,23 @@ import (
 // a change is detected however the file was replaced.
 type Watcher struct {
 	path    string
+	env     Env
 	last    []byte // the contents last read, valid or not
 	lastErr string // the last read error, so a missing file is reported once
 }
 
-// NewWatcher loads the config at path and returns it with a Watcher for
-// later changes.
-func NewWatcher(path string) (*Watcher, *Config, error) {
+// NewWatcher loads the config at path, looking up the variables it refers
+// to in env, and returns it with a Watcher for later changes.
+func NewWatcher(path string, env Env) (*Watcher, *Config, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // the path is chosen by the operator, not by untrusted input
 	if err != nil {
 		return nil, nil, err
 	}
-	cfg, err := Parse(data)
+	cfg, err := Parse(data, env)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &Watcher{path: path, last: data}, cfg, nil
+	return &Watcher{path: path, env: env, last: data}, cfg, nil
 }
 
 // Run checks the file every interval, and immediately whenever trigger
@@ -68,7 +69,7 @@ func (w *Watcher) check(apply func(*Config), reject func(error)) {
 		return
 	}
 	w.last = data
-	cfg, err := Parse(data)
+	cfg, err := Parse(data, w.env)
 	if err != nil {
 		reject(err)
 		return

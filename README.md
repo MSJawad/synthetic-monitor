@@ -616,3 +616,20 @@ and by always coming before and after "down". An overspent error budget
 reads "Used up" rather than a percentage such as -981%, and every status
 colour starts at an explicit value, so a panel with no data is never coloured
 as if it were healthy or failing.
+
+### Secrets in checks come from the environment, and never sit in URLs
+
+A check can send headers and a body, and both are templates: `${NAME}` is
+replaced by the environment variable `NAME` when the request is sent, so a
+password or API key lives in a Kubernetes Secret rather than in the checks
+file. The parsed config keeps the templates; only the prober expands them,
+just before each request, so a secret never travels through the scheduler,
+metrics or alerting, which log and display check configuration.
+
+Variables are refused in URLs. Go's HTTP errors quote the URL
+(`Get "https://..."`), and probe errors end up in logs and notifications, so
+a key in a query string would leak on the first failure. A variable that is
+unset or empty rejects the whole config: an empty secret is a deployment
+mistake, and sending it would turn into a confusing stream of 401s instead
+of one clear error at startup. Only `${NAME}` is special; a lone `$` is
+literal, and `$$` writes one, so ordinary JSON bodies need no escaping.

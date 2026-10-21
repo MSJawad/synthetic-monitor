@@ -62,7 +62,7 @@ func writeFile(t *testing.T, path, contents string) {
 
 func newWatcher(t *testing.T, path string) *Watcher {
 	t.Helper()
-	w, _, err := NewWatcher(path)
+	w, _, err := NewWatcher(path, noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestNewWatcherLoadsInitialConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "checks.yaml")
 	writeChecks(t, path, "a", "b")
 
-	_, cfg, err := NewWatcher(path)
+	_, cfg, err := NewWatcher(path, noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,12 +92,12 @@ func TestNewWatcherLoadsInitialConfig(t *testing.T) {
 
 func TestNewWatcherRejectsMissingOrInvalidFile(t *testing.T) {
 	dir := t.TempDir()
-	if _, _, err := NewWatcher(filepath.Join(dir, "missing.yaml")); err == nil {
+	if _, _, err := NewWatcher(filepath.Join(dir, "missing.yaml"), noEnv); err == nil {
 		t.Error("NewWatcher succeeded on a missing file")
 	}
 	invalid := filepath.Join(dir, "invalid.yaml")
 	writeFile(t, invalid, "checks:\n  - name: a\n")
-	if _, _, err := NewWatcher(invalid); err == nil {
+	if _, _, err := NewWatcher(invalid, noEnv); err == nil {
 		t.Error("NewWatcher succeeded on an invalid config")
 	}
 }
@@ -191,7 +191,7 @@ func TestWatcherReloadsImmediatelyOnTrigger(t *testing.T) {
 func TestVersionFollowsContents(t *testing.T) {
 	parse := func(s string) string {
 		t.Helper()
-		cfg, err := Parse([]byte(s))
+		cfg, err := Parse([]byte(s), noEnv)
 		if err != nil {
 			t.Fatal(err)
 		}

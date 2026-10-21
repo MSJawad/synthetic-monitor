@@ -93,7 +93,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 
 	// An invalid config at startup is fatal, so a bad deploy fails visibly
 	// instead of running with no checks.
-	watcher, cfg, err := config.NewWatcher(o.configPath)
+	watcher, cfg, err := config.NewWatcher(o.configPath, os.LookupEnv)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}

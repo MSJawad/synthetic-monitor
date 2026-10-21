@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,69 +39,106 @@ type HTTPPhases struct {
 }
 
 type httpProber struct {
-	url          string
-	expectStatus []int
-	bodyContains []byte
-	client       *http.Client
+	req    request
+	env    func(name string) string
+	client *http.Client
 }
 
 func newHTTP(c *config.HTTP, opts Options) *httpProber {
-	return &httpProber{
-		url:          c.URL,
-		expectStatus: c.ExpectStatus,
-		bodyContains: []byte(c.BodyContains),
-		client: &http.Client{Transport: &http.Transport{
-			// A fresh connection per probe measures what a new visitor sees,
-			// including DNS, TCP and TLS. Reusing connections would hide
-			// failures and latency in those steps.
-			DisableKeepAlives: true,
-			ForceAttemptHTTP2: true,
-			DialContext:       (&net.Dialer{Resolver: systemResolver}).DialContext,
-			TLSClientConfig:   &tls.Config{RootCAs: opts.RootCAs, MinVersion: tls.VersionTLS12},
-			// Proxy is left nil so probes go direct, ignoring HTTP_PROXY.
-		}},
-	}
+	return &httpProber{req: newRequest(c), env: opts.lookupEnv(), client: newHTTPClient(opts)}
+}
+
+// newHTTPClient returns a client for probes.
+func newHTTPClient(opts Options) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		// A fresh connection per probe measures what a new visitor sees,
+		// including DNS, TCP and TLS. Reusing connections would hide
+		// failures and latency in those steps.
+		DisableKeepAlives: true,
+		ForceAttemptHTTP2: true,
+		DialContext:       (&net.Dialer{Resolver: systemResolver}).DialContext,
+		TLSClientConfig:   &tls.Config{RootCAs: opts.RootCAs, MinVersion: tls.VersionTLS12},
+		// Proxy is left nil so probes go direct, ignoring HTTP_PROXY.
+	}}
 }
 
 func (p *httpProber) Probe(ctx context.Context) Result {
+	r, _ := p.req.do(ctx, p.client, p.env)
+	return r
+}
+
+// request is an HTTP request a prober sends and what its response must
+// look like. Its header values and body are templates, expanded on every
+// send so that secrets exist only for as long as a request needs them.
+type request struct {
+	url, method  string
+	headers      map[string]string
+	body         string
+	expectStatus []int
+	bodyContains []byte
+}
+
+func newRequest(c *config.HTTP) request {
+	return request{
+		url: c.URL, method: c.Method, headers: c.Headers, body: c.Body,
+		expectStatus: c.ExpectStatus, bodyContains: []byte(c.BodyContains),
+	}
+}
+
+// do sends the request, with templates expanded by lookup, and checks the
+// response. It also returns the body read, for multi-step checks to
+// extract values from.
+func (q *request) do(ctx context.Context, client *http.Client, lookup func(name string) string) (Result, []byte) {
 	var timer phaseTimer
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, timer.trace()), http.MethodGet, p.url, nil)
+	var body io.Reader
+	if q.body != "" {
+		body = strings.NewReader(config.Expand(q.body, lookup))
+	}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, timer.trace()), q.method, q.url, body)
 	if err != nil {
-		return Result{Reason: ReasonOther, Err: err}
+		return Result{Reason: ReasonOther, Err: err}, nil
 	}
 	req.Header.Set("User-Agent", userAgent)
+	for name, value := range q.headers {
+		value = config.Expand(value, lookup)
+		if http.CanonicalHeaderKey(name) == "Host" {
+			req.Host = value // net/http sends req.Host and ignores a Host header
+			continue
+		}
+		req.Header.Set(name, value)
+	}
 
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return Result{Reason: classify(err), Err: err, Phases: timer.phases(time.Now())}
+		return Result{Reason: classify(err), Err: err, Phases: timer.phases(time.Now())}, nil
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 
 	r := Result{Phases: timer.phases(time.Now())}
 	switch {
 	case err != nil:
 		r.Reason, r.Err = classify(err), fmt.Errorf("reading body: %w", err)
-	case !p.statusOK(resp.StatusCode):
-		r.Reason, r.Err = ReasonHTTPStatus, fmt.Errorf("status %d, want %s", resp.StatusCode, p.wantStatus())
-	case len(p.bodyContains) > 0 && !bytes.Contains(body, p.bodyContains):
-		r.Reason, r.Err = ReasonHTTPBody, fmt.Errorf("body does not contain %q", p.bodyContains)
+	case !q.statusOK(resp.StatusCode):
+		r.Reason, r.Err = ReasonHTTPStatus, fmt.Errorf("status %d, want %s", resp.StatusCode, q.wantStatus())
+	case len(q.bodyContains) > 0 && !bytes.Contains(respBody, q.bodyContains):
+		r.Reason, r.Err = ReasonHTTPBody, fmt.Errorf("body does not contain %q", q.bodyContains)
 	}
-	return r
+	return r, respBody
 }
 
-func (p *httpProber) statusOK(code int) bool {
-	if len(p.expectStatus) == 0 {
+func (q *request) statusOK(code int) bool {
+	if len(q.expectStatus) == 0 {
 		return code >= 200 && code <= 299
 	}
-	return slices.Contains(p.expectStatus, code)
+	return slices.Contains(q.expectStatus, code)
 }
 
-func (p *httpProber) wantStatus() string {
-	if len(p.expectStatus) == 0 {
+func (q *request) wantStatus() string {
+	if len(q.expectStatus) == 0 {
 		return "2xx"
 	}
-	return fmt.Sprint(p.expectStatus)
+	return fmt.Sprint(q.expectStatus)
 }
 
 // phaseTimer records when each step of an HTTP request starts and ends.

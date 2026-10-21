@@ -118,7 +118,7 @@ func TestMonitor(t *testing.T) {
 	path := filepath.Join(dir, "checks.yaml")
 	web := "  - name: web\n    interval: 2s\n    timeout: 2s\n    slo: {target: 99}\n    http: {url: \"" + target.URL + "\"}\n"
 	writeFile(t, path, "checks:\n"+web)
-	watcher, cfg, err := config.NewWatcher(path)
+	watcher, cfg, err := config.NewWatcher(path, os.LookupEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestShutdownDeadline(t *testing.T) {
 	writeFile(t, path, "checks:\n"+
 		"  - name: hangs\n    interval: 10s\n    http: {url: \""+hangs.URL+"\"}\n"+
 		"  - name: web\n    interval: 1s\n    http: {url: \""+ok.URL+"\"}\n")
-	watcher, cfg, err := config.NewWatcher(path)
+	watcher, cfg, err := config.NewWatcher(path, os.LookupEnv)
 	if err != nil {
 		t.Fatal(err)
 	}

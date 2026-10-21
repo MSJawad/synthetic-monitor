@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/http"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -9,6 +10,9 @@ import (
 
 	"go.uber.org/goleak"
 )
+
+// noEnv is an environment with no variables set.
+func noEnv(string) (string, bool) { return "", false }
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
@@ -32,13 +36,13 @@ checks:
   - name: cert
     tls:
       address: example.com:443
-`))
+`), noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []Check{
 		{Name: "web", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2, SLO: &SLO{Target: 99.5, WindowDays: 30},
-			HTTP: &HTTP{URL: "https://example.com/healthz"}},
+			HTTP: &HTTP{URL: "https://example.com/healthz", Method: "GET"}},
 		{Name: "fast", Interval: 5 * time.Second, Timeout: 5 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 			TCP: &TCP{Address: "example.com:5432"}},
 		{Name: "resolver", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
@@ -75,14 +79,14 @@ checks:
       address: 203.0.113.10:8443
       server_name: example.com
       min_days_remaining: 30
-`))
+`), noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []Check{
 		{Name: "api", Interval: time.Minute, Timeout: 5 * time.Second, MaxLatency: 800 * time.Millisecond, FailureThreshold: 5, SuccessThreshold: 1,
 			SLO:  &SLO{Target: 99.9, WindowDays: 7},
-			HTTP: &HTTP{URL: "http://api.internal:8080/ready", ExpectStatus: []int{200, 204}, BodyContains: `"status":"ok"`}},
+			HTTP: &HTTP{URL: "http://api.internal:8080/ready", Method: "GET", ExpectStatus: []int{200, 204}, BodyContains: `"status":"ok"`}},
 		{Name: "ns", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 			DNS: &DNS{Host: "example.com", Server: "[2606:4700:4700::1111]:53", ExpectAddresses: []netip.Addr{
 				netip.MustParseAddr("93.184.215.14"), netip.MustParseAddr("2606:2800:21f:cb07:6820:80da:af6b:8b2c"),
@@ -106,7 +110,7 @@ checks:
   - <<: *slow
     name: b
     tcp: {address: "b.example:22"}
-`))
+`), noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,10 +235,42 @@ checks:
 checks:
   - name: a
     tls: {address: "a:443", min_days_remaining: -1}`, "must not be negative"},
+		{"unknown method", `
+checks:
+  - name: a
+    http: {url: "http://a", method: FETCH}`, `http.method "FETCH" must be one of GET, HEAD`},
+		{"invalid header name", `
+checks:
+  - name: a
+    http: {url: "http://a", headers: {"Bad Name": x}}`, `http.headers["Bad Name"] is not a valid header name`},
+		{"same header twice", `
+checks:
+  - name: a
+    http: {url: "http://a", headers: {content-type: a, Content-Type: b}}`, "are the same header"},
+		{"multi-line header", `
+checks:
+  - name: a
+    http: {url: "http://a", headers: {X-A: "a\nb"}}`, `headers["X-A"] must be a single line`},
+		{"variable in URL", `
+checks:
+  - name: a
+    http: {url: "http://a/?key=${KEY}"}`, "http.url must not contain variables"},
+		{"unset variable", `
+checks:
+  - name: a
+    http: {url: "http://a", headers: {X-Key: "${KEY}"}}`, `http.headers["X-Key"] refers to ${KEY}, which is not set`},
+		{"unclosed variable", `
+checks:
+  - name: a
+    http: {url: "http://a", body: "token=${KEY"}`, "http.body: unclosed ${"},
+		{"invalid variable name", `
+checks:
+  - name: a
+    http: {url: "http://a", body: "${1X}"}`, "${1X} is not a valid variable name"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Parse([]byte(tt.yaml))
+			_, err := Parse([]byte(tt.yaml), noEnv)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
 			}
@@ -250,7 +286,7 @@ checks:
     tcp: {address: "a:1"}
   - name: b
     http: {url: nope}
-`))
+`), noEnv)
 	if err == nil {
 		t.Fatal("Parse succeeded, want an error")
 	}
@@ -262,7 +298,7 @@ checks:
 }
 
 func TestExampleConfigIsValid(t *testing.T) {
-	if _, _, err := NewWatcher("../../examples/checks.yaml"); err != nil {
+	if _, _, err := NewWatcher("../../examples/checks.yaml", noEnv); err != nil {
 		t.Fatalf("examples/checks.yaml: %v", err)
 	}
 }
@@ -271,6 +307,65 @@ func TestSLORatio(t *testing.T) {
 	for target, want := range map[float64]float64{99.9: 0.999, 99.5: 0.995, 99.95: 0.9995, 90: 0.9, 0.1: 0.001} {
 		if got := (SLO{Target: target}).Ratio(); got != want {
 			t.Errorf("Ratio of %v = %v, want %v", target, got, want)
+		}
+	}
+}
+
+func TestParseRequestTemplates(t *testing.T) {
+	env := func(name string) (string, bool) {
+		v, ok := map[string]string{"KEY": "s3cr3t", "EMPTY": "", "MULTI": "a\nb"}[name]
+		return v, ok
+	}
+	cfg, err := Parse([]byte(`
+checks:
+  - name: login
+    http:
+      url: https://api.example.com/signin
+      method: post
+      headers: {Content-Type: application/json, X-Key: "${KEY}"}
+      body: '{"password": "${KEY}", "price": "$5"}'
+`), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cfg.Checks[0].HTTP
+	if h.Method != http.MethodPost {
+		t.Errorf("method = %q, want POST", h.Method)
+	}
+	// The config keeps the templates; only the prober sees the values.
+	if h.Headers["X-Key"] != "${KEY}" || strings.Contains(h.Body, "s3cr3t") {
+		t.Errorf("headers %v, body %q: want the templates unexpanded", h.Headers, h.Body)
+	}
+
+	for _, tt := range []struct{ name, want string }{
+		{"EMPTY", "${EMPTY}, which is empty in the environment"},
+		{"MULTI", "${MULTI}, whose value spans several lines"},
+	} {
+		_, err := Parse([]byte(`
+checks:
+  - name: a
+    http: {url: "http://a", headers: {X-A: "${`+tt.name+`}"}}
+`), env)
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("${%s}: error = %v, want it to contain %q", tt.name, err, tt.want)
+		}
+	}
+}
+
+func TestExpand(t *testing.T) {
+	vars := map[string]string{"A": "1", "TOKEN": "abc"}
+	lookup := func(name string) string { return vars[name] }
+	for _, tt := range []struct{ in, want string }{
+		{"plain", "plain"},
+		{"Bearer ${TOKEN}", "Bearer abc"},
+		{"${A}${A}", "11"},
+		{"costs $5", "costs $5"},
+		{"ends with $", "ends with $"},
+		{"literal $${A}", "literal ${A}"},
+		{"$$$$", "$$"},
+	} {
+		if got := Expand(tt.in, lookup); got != tt.want {
+			t.Errorf("Expand(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }

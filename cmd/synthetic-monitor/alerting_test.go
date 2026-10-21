@@ -92,7 +92,7 @@ type runningMonitor struct {
 func startMonitor(t *testing.T, path, historyPath, ntfyURL string) *runningMonitor {
 	t.Helper()
 	logger := slog.New(slog.DiscardHandler)
-	watcher, cfg, err := config.NewWatcher(path)
+	watcher, cfg, err := config.NewWatcher(path, os.LookupEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
