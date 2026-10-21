@@ -42,6 +42,7 @@ go run ./cmd/synthetic-monitor -config examples/checks.yaml -log-level debug
 | `-config-poll-interval` | `5s` | how often the checks file is checked for changes |
 | `-shutdown-timeout` | `30s` | how long probes in flight get to finish after SIGTERM |
 | `-log-level` | `info` | `debug` also logs every successful probe |
+| `-debug-listen` | (off) | address for `/debug/pprof/`, e.g. `127.0.0.1:6060`; never expose it publicly |
 
 Alerts go to [ntfy](https://ntfy.sh), configured through the environment so the
 topic can live in a secret:

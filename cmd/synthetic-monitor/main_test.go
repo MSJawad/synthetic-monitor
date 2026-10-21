@@ -73,6 +73,14 @@ func TestHealthAndReadiness(t *testing.T) {
 	}
 }
 
+func TestDebugMuxServesLeakProfile(t *testing.T) {
+	rec := httptest.NewRecorder()
+	debugMux().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/debug/pprof/goroutineleak?debug=1", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "goroutineleak profile: total 0") {
+		t.Fatalf("goroutineleak profile = %d %q, want 200 with no leaks", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCheckRetention(t *testing.T) {
 	cfg := &config.Config{Checks: []config.Check{
 		{Name: "short", SLO: &config.SLO{Target: 99, WindowDays: 30}},

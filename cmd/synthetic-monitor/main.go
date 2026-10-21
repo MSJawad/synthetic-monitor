@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof" //nolint:gosec // served only by debugMux on its own opt-in listener, not on http.DefaultServeMux's
 	"os"
 	"os/signal"
 	"sync"
@@ -38,6 +39,7 @@ func main() {
 type options struct {
 	configPath      string
 	listen          string
+	debugListen     string
 	historyPath     string
 	retentionDays   int
 	maxConcurrent   int
@@ -56,6 +58,8 @@ func parseFlags(args []string) (options, error) {
 	flags := flag.NewFlagSet("synthetic-monitor", flag.ContinueOnError)
 	flags.StringVar(&o.configPath, "config", "", "path to the checks file (required)")
 	flags.StringVar(&o.listen, "listen", ":8080", "address of the HTTP server for metrics and health checks")
+	flags.StringVar(&o.debugListen, "debug-listen", "",
+		"address for pprof profiling endpoints, such as 127.0.0.1:6060; off if empty, never expose publicly")
 	flags.StringVar(&o.historyPath, "history", "history.db", "path to the SQLite database of probe results")
 	flags.IntVar(&o.retentionDays, "history-retention-days", 35, "days of probe results to keep; must cover every SLO window")
 	flags.IntVar(&o.maxConcurrent, "max-concurrent-probes", 64, "maximum number of probes in flight at once")
@@ -119,6 +123,16 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	ln, err := lc.Listen(ctx, "tcp", o.listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
+	}
+	if o.debugListen != "" {
+		dln, err := lc.Listen(ctx, "tcp", o.debugListen)
+		if err != nil {
+			return fmt.Errorf("debug listen: %w", err)
+		}
+		debug := &http.Server{Handler: debugMux(), ReadHeaderTimeout: 5 * time.Second}
+		go func() { _ = debug.Serve(dln) }()
+		defer debug.Close()
+		logger.Info("debug server listening", "addr", dln.Addr().String())
 	}
 	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, notifier: notifier, reload: reload}
 	return svc.serve(ctx, ln, cfg)
@@ -297,6 +311,20 @@ func newMux(ready *atomic.Bool, metrics, status http.Handler) *http.ServeMux {
 		}
 		_, _ = io.WriteString(w, "ready\n")
 	})
+	return mux
+}
+
+// debugMux serves the runtime profiles: CPU, heap, goroutines, and the
+// goroutineleak profile (Go 1.27), which lists goroutines blocked forever on
+// a channel or lock that nothing can reach any more. It runs on its own
+// listener so it is never exposed with the status page.
+func debugMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 	return mux
 }
 
