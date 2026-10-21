@@ -7,6 +7,25 @@ it recovers.
 
 Status: v1 in progress.
 
+## Status page
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/status-page-dark.png">
+  <img src="docs/images/status-page-light.png" width="720"
+       alt="The status page with four demo checks: one up, one down, one failing and one recovering. Each shows its latency now with a sparkline of the last 60 probes, failed probes shaded, and its availability against an SLO with an error budget meter.">
+</picture>
+
+On a phone, with a check's recent probes expanded:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/status-page-mobile-dark.png">
+  <img src="docs/images/status-page-mobile-light.png" width="320"
+       alt="A down check on a phone: its latency sparkline shaded where probes failed, its exhausted error budget, and a table of its most recent probes.">
+</picture>
+
+The screenshots show demo checks against a local target made to fail on
+purpose. The page follows the viewer's light or dark preference.
+
 ## Running
 
 ```sh
