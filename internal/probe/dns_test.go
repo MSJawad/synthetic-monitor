@@ -34,6 +34,15 @@ func TestDNS(t *testing.T) {
 	}
 }
 
+func TestDNSErrorNamesConfiguredServer(t *testing.T) {
+	server := startFakeDNS(t, nil)
+	r := run(t, config.Check{DNS: &config.DNS{Host: "missing.test.", Server: server}}, Options{})
+	wantReason(t, r, ReasonDNS)
+	if !strings.Contains(r.Err.Error(), "on "+server) {
+		t.Fatalf("error %q does not name the queried server %s", r.Err, server)
+	}
+}
+
 func TestDNSUnresponsiveServer(t *testing.T) {
 	// The resolver must not keep waiting for an answer after the probe
 	// has given up.

@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -46,17 +47,24 @@ func newResolver(server string) *net.Resolver {
 
 type dnsProber struct {
 	host     string
+	server   string
 	expect   []netip.Addr
 	resolver *net.Resolver
 }
 
 func newDNS(c *config.DNS) *dnsProber {
-	return &dnsProber{host: c.Host, expect: c.ExpectAddresses, resolver: newResolver(c.Server)}
+	return &dnsProber{host: c.Host, server: c.Server, expect: c.ExpectAddresses, resolver: newResolver(c.Server)}
 }
 
 func (p *dnsProber) Probe(ctx context.Context) Result {
 	addrs, err := p.resolver.LookupNetIP(ctx, "ip", p.host)
 	if err != nil {
+		// The resolver names the resolv.conf server it meant to query, not
+		// the one its dial function actually sent the query to.
+		var dnsErr *net.DNSError
+		if p.server != "" && errors.As(err, &dnsErr) {
+			dnsErr.Server = p.server
+		}
 		return Result{Reason: classify(err), Err: err}
 	}
 	// IPv4 answers can come back as IPv4-mapped IPv6 addresses.
