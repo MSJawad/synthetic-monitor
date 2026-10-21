@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.uber.org/goleak"
 
+	"github.com/MSJawad/synthetic-monitor/internal/alert"
 	"github.com/MSJawad/synthetic-monitor/internal/config"
 	"github.com/MSJawad/synthetic-monitor/internal/probe"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
@@ -157,6 +158,7 @@ func TestForgetDeletesEveryCheckSeries(t *testing.T) {
 		r.CertNotAfter = t0
 		m.Record(r)
 		m.Skipped(name, 1)
+		m.AlertObserver().Firing(name, true)
 	}
 	m.SetChecks([]config.Check{
 		{Name: "gone", TCP: &config.TCP{}, SLO: &config.SLO{Target: 99, WindowDays: 1}},
@@ -238,4 +240,33 @@ func grep(text, substr string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func TestAlertObserver(t *testing.T) {
+	m := New()
+	o := m.AlertObserver()
+	o.Firing("web", true)
+	o.Firing("api", true)
+	o.Firing("api", false)
+	o.Delivered(alert.KindAlert)
+	o.DeliveryFailed(alert.KindRecovery, false)
+	o.DeliveryFailed(alert.KindRecovery, false)
+	o.DeliveryFailed(alert.KindAlert, true)
+	o.Pending(2)
+	o.DroppedResult()
+
+	body := scrape(t, m)
+	for _, want := range []string{
+		`synthetic_alert_firing{check="web"} 1`,
+		`synthetic_alert_firing{check="api"} 0`,
+		`synthetic_notifications_delivered_total{kind="alert"} 1`,
+		`synthetic_notification_delivery_failures_total{kind="recovery",permanent="false"} 2`,
+		`synthetic_notification_delivery_failures_total{kind="alert",permanent="true"} 1`,
+		"synthetic_notifications_pending 2",
+		"synthetic_alert_dropped_results_total 1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics lacks %q", want)
+		}
+	}
 }

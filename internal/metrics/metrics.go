@@ -4,6 +4,7 @@ package metrics
 
 import (
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/MSJawad/synthetic-monitor/internal/alert"
 	"github.com/MSJawad/synthetic-monitor/internal/config"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
 	"github.com/MSJawad/synthetic-monitor/internal/slo"
@@ -45,6 +47,12 @@ type Metrics struct {
 	sloTarget       *prometheus.GaugeVec
 	sloAvailability *prometheus.GaugeVec
 	sloBudget       *prometheus.GaugeVec
+
+	alertFiring          *prometheus.GaugeVec
+	notificationsSent    *prometheus.CounterVec
+	notificationFailures *prometheus.CounterVec
+	notificationsPending prometheus.Gauge
+	alertDropped         prometheus.Counter
 
 	mu    sync.Mutex
 	types map[string]string // check name to type, as last set on checkInfo
@@ -113,6 +121,26 @@ func New() *Metrics {
 			Namespace: namespace, Name: "slo_error_budget_remaining_ratio",
 			Help: "Fraction of the check's error budget left over its SLO window; negative once overspent.",
 		}, []string{"check"}),
+		alertFiring: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "alert_firing",
+			Help: "1 while the check's alert is firing: from the alert until the recovery notice.",
+		}, []string{"check"}),
+		notificationsSent: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "notifications_delivered_total",
+			Help: "Notifications the notifier accepted, by kind: alert, recovery or removed.",
+		}, []string{"kind"}),
+		notificationFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "notification_delivery_failures_total",
+			Help: `Failed notification deliveries, by kind and whether the failure was permanent ("true": given up on) or will be retried ("false").`,
+		}, []string{"kind", "permanent"}),
+		notificationsPending: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "notifications_pending",
+			Help: "Notifications saved but not yet delivered.",
+		}),
+		alertDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Name: "alert_dropped_results_total",
+			Help: "Probe results not evaluated for alerting because the queue was full.",
+		}),
 		types: make(map[string]string),
 		slos:  make(map[string]bool),
 	}
@@ -120,6 +148,7 @@ func New() *Metrics {
 		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.checkInfo,
 		m.lag, m.skipped, m.reloads, m.lastReloadOK, m.lastReloadTimeOK,
 		m.sloTarget, m.sloAvailability, m.sloBudget,
+		m.alertFiring, m.notificationsSent, m.notificationFailures, m.notificationsPending, m.alertDropped,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -184,7 +213,7 @@ func (m *Metrics) Forget(check string) {
 	labels := prometheus.Labels{"check": check}
 	for _, vec := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
 		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.checkInfo,
-		m.skipped, m.sloTarget, m.sloAvailability, m.sloBudget,
+		m.skipped, m.sloTarget, m.sloAvailability, m.sloBudget, m.alertFiring,
 	} {
 		vec.DeletePartialMatch(labels)
 	}
@@ -228,6 +257,31 @@ func (m *Metrics) SetSLOStatus(statuses map[string]slo.Status) {
 		m.slos[name] = true
 	}
 }
+
+// AlertObserver returns an alert.Observer that records alerting activity.
+func (m *Metrics) AlertObserver() alert.Observer { return alertObserver{m} }
+
+type alertObserver struct{ m *Metrics }
+
+func (o alertObserver) Firing(check string, firing bool) {
+	v := 0.0
+	if firing {
+		v = 1
+	}
+	o.m.alertFiring.WithLabelValues(check).Set(v)
+}
+
+func (o alertObserver) Delivered(kind alert.Kind) {
+	o.m.notificationsSent.WithLabelValues(string(kind)).Inc()
+}
+
+func (o alertObserver) DeliveryFailed(kind alert.Kind, permanent bool) {
+	o.m.notificationFailures.WithLabelValues(string(kind), strconv.FormatBool(permanent)).Inc()
+}
+
+func (o alertObserver) Pending(n int) { o.m.notificationsPending.Set(float64(n)) }
+
+func (o alertObserver) DroppedResult() { o.m.alertDropped.Inc() }
 
 // TrackInFlight exports the number of probes running, read from f at
 // scrape time.
