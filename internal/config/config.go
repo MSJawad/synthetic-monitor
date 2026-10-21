@@ -61,6 +61,17 @@ type SLO struct {
 	WindowDays int     `yaml:"window_days"`
 }
 
+// Ratio returns Target as a fraction, e.g. 0.999 for 99.9.
+func (s SLO) Ratio() float64 {
+	// Dividing by 100 rounds twice and gives 0.9990000000000001 for 99.9.
+	// Parsing the decimal with an exponent rounds once, to the nearest float.
+	r, err := strconv.ParseFloat(strconv.FormatFloat(s.Target, 'f', -1, 64)+"e-2", 64)
+	if err != nil {
+		return s.Target / 100 // unreachable: FormatFloat output always parses
+	}
+	return r
+}
+
 // Window returns the SLO's window as a duration.
 func (s SLO) Window() time.Duration {
 	return time.Duration(s.WindowDays) * 24 * time.Hour

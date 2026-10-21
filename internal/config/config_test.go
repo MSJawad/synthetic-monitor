@@ -254,3 +254,11 @@ func TestExampleConfigIsValid(t *testing.T) {
 		t.Fatalf("examples/checks.yaml: %v", err)
 	}
 }
+
+func TestSLORatio(t *testing.T) {
+	for target, want := range map[float64]float64{99.9: 0.999, 99.5: 0.995, 99.95: 0.9995, 90: 0.9, 0.1: 0.001} {
+		if got := (SLO{Target: target}).Ratio(); got != want {
+			t.Errorf("Ratio of %v = %v, want %v", target, got, want)
+		}
+	}
+}
