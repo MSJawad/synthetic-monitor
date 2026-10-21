@@ -10,7 +10,7 @@ type tcpProber struct {
 }
 
 func (p *tcpProber) Probe(ctx context.Context) Result {
-	var d net.Dialer
+	d := net.Dialer{Resolver: systemResolver}
 	conn, err := d.DialContext(ctx, "tcp", p.address)
 	if err != nil {
 		return Result{Reason: classify(err), Err: err}

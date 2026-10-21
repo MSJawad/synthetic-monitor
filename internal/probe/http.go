@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"slices"
@@ -54,6 +55,7 @@ func newHTTP(c *config.HTTP, opts Options) *httpProber {
 			// failures and latency in those steps.
 			DisableKeepAlives: true,
 			ForceAttemptHTTP2: true,
+			DialContext:       (&net.Dialer{Resolver: systemResolver}).DialContext,
 			TLSClientConfig:   &tls.Config{RootCAs: opts.RootCAs, MinVersion: tls.VersionTLS12},
 			// Proxy is left nil so probes go direct, ignoring HTTP_PROXY.
 		}},

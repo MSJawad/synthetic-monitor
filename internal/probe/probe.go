@@ -75,6 +75,8 @@ func New(c config.Check, opts Options) Prober {
 		p = newHTTP(c.HTTP, opts)
 	case c.TCP != nil:
 		p = &tcpProber{address: c.TCP.Address}
+	case c.DNS != nil:
+		p = newDNS(c.DNS)
 	default:
 		panic(fmt.Sprintf("probe: check %q has no probe type", c.Name))
 	}

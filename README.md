@@ -86,3 +86,16 @@ a DNS timeout); the wrapper reports all of them as `timeout`, so the failure
 reason does not depend on which step was running at the time. A probe
 cancelled by its caller, for example at shutdown, is reported as `canceled`
 and is not the target's fault.
+
+### One resolver for every probe, released as soon as a probe gives up
+
+All probes resolve names with Go's own DNS client rather than the platform's
+(`PreferGo`). It behaves the same on macOS and in the Linux container, has no
+cache, so every probe sends real queries, and honours the probe's context.
+
+The goroutine leak tests found one gap: when a probe times out, Go's resolver
+cancels the lookup, but the UDP read in flight is bounded only by its
+per-attempt deadline from `resolv.conf` (5 seconds by default). Each timed-out
+DNS probe left a goroutine and a socket behind for up to 5 seconds, which
+piles up against a dead nameserver. The resolver's dial function now closes
+the connection as soon as the lookup's context ends.
