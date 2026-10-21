@@ -19,7 +19,10 @@ import (
 	"time"
 
 	"github.com/MSJawad/synthetic-monitor/internal/config"
+	"github.com/MSJawad/synthetic-monitor/internal/metrics"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
+	"github.com/MSJawad/synthetic-monitor/internal/slo"
+	"github.com/MSJawad/synthetic-monitor/internal/store"
 )
 
 func main() {
@@ -33,17 +36,26 @@ func main() {
 type options struct {
 	configPath      string
 	listen          string
+	historyPath     string
+	retentionDays   int
 	maxConcurrent   int
 	pollInterval    time.Duration
 	shutdownTimeout time.Duration
 	logLevel        slog.Level
+	sloInterval     time.Duration // not a flag: tests shorten it
+}
+
+func (o options) retention() time.Duration {
+	return time.Duration(o.retentionDays) * 24 * time.Hour
 }
 
 func parseFlags(args []string) (options, error) {
-	var o options
+	o := options{sloInterval: 30 * time.Second}
 	flags := flag.NewFlagSet("synthetic-monitor", flag.ContinueOnError)
 	flags.StringVar(&o.configPath, "config", "", "path to the checks file (required)")
-	flags.StringVar(&o.listen, "listen", ":8080", "address of the HTTP server for health checks")
+	flags.StringVar(&o.listen, "listen", ":8080", "address of the HTTP server for metrics and health checks")
+	flags.StringVar(&o.historyPath, "history", "history.db", "path to the SQLite database of probe results")
+	flags.IntVar(&o.retentionDays, "history-retention-days", 35, "days of probe results to keep; must cover every SLO window")
 	flags.IntVar(&o.maxConcurrent, "max-concurrent-probes", 64, "maximum number of probes in flight at once")
 	flags.DurationVar(&o.pollInterval, "config-poll-interval", 5*time.Second, "how often to check the checks file for changes")
 	flags.DurationVar(&o.shutdownTimeout, "shutdown-timeout", 30*time.Second,
@@ -57,6 +69,8 @@ func parseFlags(args []string) (options, error) {
 		return o, errors.New("-config is required")
 	case o.maxConcurrent < 1:
 		return o, errors.New("-max-concurrent-probes must be at least 1")
+	case o.retentionDays < 1:
+		return o, errors.New("-history-retention-days must be at least 1")
 	case o.pollInterval <= 0 || o.shutdownTimeout <= 0:
 		return o, errors.New("-config-poll-interval and -shutdown-timeout must be positive")
 	}
@@ -76,6 +90,9 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	if err := checkRetention(cfg, o.retention()); err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -86,29 +103,74 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	signal.Notify(reload, syscall.SIGHUP)
 	defer signal.Stop(reload)
 
+	history, err := store.Open(ctx, o.historyPath, store.Options{Retention: o.retention(), Logger: logger})
+	if err != nil {
+		return fmt.Errorf("opening history: %w", err)
+	}
+	defer history.Close(context.WithoutCancel(ctx)) //nolint:errcheck // closed with a deadline during shutdown; this only covers early returns
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", o.listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	return monitor(ctx, ln, watcher, cfg, reload, o, logger)
+	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, reload: reload}
+	return svc.serve(ctx, ln, cfg)
 }
 
-// monitor runs the service until ctx is cancelled, then shuts down in an
-// order that loses no results: report not ready, stop config reloads, let
-// probes in flight finish (aborting them if o.shutdownTimeout runs out),
-// and stop the HTTP server last so health checks keep answering meanwhile.
-func monitor(ctx context.Context, ln net.Listener, watcher *config.Watcher, cfg *config.Config,
-	reload <-chan os.Signal, o options, logger *slog.Logger,
-) error {
-	sched := scheduler.New(logSink{logger}, scheduler.Options{MaxConcurrent: o.maxConcurrent, Logger: logger})
+// checkRetention rejects SLO windows longer than the history kept, which
+// would silently compute SLOs over less data than they claim.
+func checkRetention(cfg *config.Config, retention time.Duration) error {
+	var errs []error
+	for _, c := range cfg.Checks {
+		if c.SLO != nil && c.SLO.Window() > retention {
+			errs = append(errs, fmt.Errorf("check %q: slo.window_days %d exceeds the %d days of history kept (-history-retention-days)",
+				c.Name, c.SLO.WindowDays, int(retention.Hours()/24)))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// service is the running monitor: what serve needs, opened by run.
+type service struct {
+	opts    options
+	logger  *slog.Logger
+	watcher *config.Watcher
+	history *store.Store
+	reload  <-chan os.Signal
+}
+
+// serve runs the monitor with cfg until ctx is cancelled, then shuts down in
+// an order that loses no results: report not ready, stop config reloads and
+// SLO evaluation, let probes in flight finish (aborting them if
+// shutdownTimeout runs out), write the queued history, and stop the HTTP
+// server last so health checks keep answering meanwhile.
+func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config) error {
+	logger := s.logger
+	m := metrics.New()
+	m.TrackHistory(s.history)
+	sched := scheduler.New(sinks{m, s.history, logSink{logger}}, scheduler.Options{
+		MaxConcurrent: s.opts.maxConcurrent,
+		Logger:        logger,
+		OnSkip:        m.Skipped,
+		OnRemoved:     m.Forget,
+	})
+	m.TrackInFlight(sched.InFlight)
+
+	var current atomic.Pointer[config.Config]
+	apply := func(cfg *config.Config) {
+		current.Store(cfg)
+		m.SetChecks(cfg.Checks)
+		sched.Apply(cfg.Checks)
+		m.ConfigLoaded(true)
+	}
 	logger.Info("config loaded", "version", cfg.Version, "checks", len(cfg.Checks))
-	sched.Apply(cfg.Checks)
+	apply(cfg)
 
 	var ready atomic.Bool
 	ready.Store(true)
 	srv := &http.Server{
-		Handler:           newMux(&ready),
+		Handler:           newMux(&ready, m.Handler()),
 		ReadHeaderTimeout: 5 * time.Second, // bounds clients that send headers slowly to hold connections open
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -116,17 +178,28 @@ func monitor(ctx context.Context, ln net.Listener, watcher *config.Watcher, cfg 
 	go func() { serveErr <- srv.Serve(ln) }()
 	logger.Info("http server listening", "addr", ln.Addr().String())
 
-	watchCtx, stopWatching := context.WithCancel(ctx)
-	var watching sync.WaitGroup
-	watching.Go(func() {
-		watcher.Run(watchCtx, o.pollInterval, reload,
+	// Background work that must stop before the scheduler and history do.
+	bgCtx, stopBackground := context.WithCancel(ctx)
+	var background sync.WaitGroup
+	background.Go(func() {
+		reject := func(err error) {
+			m.ConfigLoaded(false)
+			logger.Error("config rejected, previous config stays in effect", "err", err)
+		}
+		s.watcher.Run(bgCtx, s.opts.pollInterval, s.reload,
 			func(cfg *config.Config) {
+				if err := checkRetention(cfg, s.opts.retention()); err != nil {
+					reject(err)
+					return
+				}
 				logger.Info("config reloaded", "version", cfg.Version, "checks", len(cfg.Checks))
-				sched.Apply(cfg.Checks)
-			},
-			func(err error) {
-				logger.Error("config rejected, previous config stays in effect", "err", err)
-			})
+				apply(cfg)
+			}, reject)
+	})
+	background.Go(func() {
+		slo.Run(bgCtx, s.opts.sloInterval, s.history,
+			func() []config.Check { return current.Load().Checks },
+			m.SetSLOStatus, logger)
 	})
 
 	var err error
@@ -137,15 +210,18 @@ func monitor(ctx context.Context, ln net.Listener, watcher *config.Watcher, cfg 
 	}
 	logger.Info("shutting down")
 	ready.Store(false)
-	stopWatching()
-	watching.Wait() // no reload can start checks from here on
+	stopBackground()
+	background.Wait() // no reload can start checks from here on
 
 	// ctx is already cancelled, so shutdown needs its own deadline.
 	// WithoutCancel keeps ctx's values but drops its cancellation.
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.opts.shutdownTimeout)
 	defer cancel()
 	if stopErr := sched.Stop(shutdownCtx); stopErr != nil {
 		logger.Warn("shutdown deadline reached", "err", stopErr)
+	}
+	if closeErr := s.history.Close(shutdownCtx); closeErr != nil {
+		err = errors.Join(err, fmt.Errorf("closing history: %w", closeErr))
 	}
 	if shutErr := srv.Shutdown(shutdownCtx); shutErr != nil {
 		_ = srv.Close()
@@ -155,8 +231,9 @@ func monitor(ctx context.Context, ln net.Listener, watcher *config.Watcher, cfg 
 	return err
 }
 
-func newMux(ready *atomic.Bool) *http.ServeMux {
+func newMux(ready *atomic.Bool, metrics http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "ok\n")
@@ -173,6 +250,15 @@ func newMux(ready *atomic.Bool) *http.ServeMux {
 		_, _ = io.WriteString(w, "ready\n")
 	})
 	return mux
+}
+
+// sinks passes each probe result to every sink in turn.
+type sinks []scheduler.Sink
+
+func (ss sinks) Record(r scheduler.Result) {
+	for _, s := range ss {
+		s.Record(r)
+	}
 }
 
 // logSink logs probe results: failures at warn, successes at debug.

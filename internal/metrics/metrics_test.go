@@ -15,6 +15,7 @@ import (
 	"github.com/MSJawad/synthetic-monitor/internal/config"
 	"github.com/MSJawad/synthetic-monitor/internal/probe"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
+	"github.com/MSJawad/synthetic-monitor/internal/slo"
 )
 
 func TestMain(m *testing.M) {
@@ -131,8 +132,8 @@ synthetic_check_info{check="a",type="http"} 1
 
 func TestSetSLOStatusReplacesSeries(t *testing.T) {
 	m := New()
-	m.SetSLOStatus(map[string]SLOStatus{"a": {0.99, 0.5}, "b": {1, 1}})
-	m.SetSLOStatus(map[string]SLOStatus{"a": {0.98, -0.2}})
+	m.SetSLOStatus(map[string]slo.Status{"a": {Availability: 0.99, BudgetRemaining: 0.5}, "b": {Availability: 1, BudgetRemaining: 1}})
+	m.SetSLOStatus(map[string]slo.Status{"a": {Availability: 0.98, BudgetRemaining: -0.2}})
 
 	want := `
 # HELP synthetic_slo_availability_ratio Fraction of the check's probes that succeeded over its SLO window.
@@ -161,7 +162,7 @@ func TestForgetDeletesEveryCheckSeries(t *testing.T) {
 		{Name: "gone", TCP: &config.TCP{}, SLO: &config.SLO{Target: 99, WindowDays: 1}},
 		{Name: "kept", TCP: &config.TCP{}},
 	})
-	m.SetSLOStatus(map[string]SLOStatus{"gone": {1, 1}})
+	m.SetSLOStatus(map[string]slo.Status{"gone": {Availability: 1, BudgetRemaining: 1}})
 
 	m.Forget("gone")
 	got, err := testutil.GatherAndCount(m.registry)

@@ -21,6 +21,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/MSJawad/synthetic-monitor/internal/config"
+	"github.com/MSJawad/synthetic-monitor/internal/store"
 )
 
 func TestMain(m *testing.M) {
@@ -32,8 +33,9 @@ func TestParseFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := options{configPath: "checks.yaml", listen: ":8080", maxConcurrent: 64,
-		pollInterval: 5 * time.Second, shutdownTimeout: 30 * time.Second, logLevel: slog.LevelDebug}
+	want := options{configPath: "checks.yaml", listen: ":8080", historyPath: "history.db", retentionDays: 35,
+		maxConcurrent: 64, pollInterval: 5 * time.Second, shutdownTimeout: 30 * time.Second,
+		logLevel: slog.LevelDebug, sloInterval: 30 * time.Second}
 	if o != want {
 		t.Errorf("options = %+v, want %+v", o, want)
 	}
@@ -41,6 +43,7 @@ func TestParseFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{},
 		{"-config", "c.yaml", "-max-concurrent-probes", "0"},
+		{"-config", "c.yaml", "-history-retention-days", "0"},
 		{"-config", "c.yaml", "-shutdown-timeout", "0s"},
 		{"-config", "c.yaml", "-log-level", "loud"},
 	} {
@@ -52,7 +55,7 @@ func TestParseFlags(t *testing.T) {
 
 func TestHealthAndReadiness(t *testing.T) {
 	var ready atomic.Bool
-	mux := newMux(&ready)
+	mux := newMux(&ready, http.NotFoundHandler())
 	status := func(path string) int {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
@@ -69,8 +72,21 @@ func TestHealthAndReadiness(t *testing.T) {
 	}
 }
 
+func TestCheckRetention(t *testing.T) {
+	cfg := &config.Config{Checks: []config.Check{
+		{Name: "short", SLO: &config.SLO{Target: 99, WindowDays: 30}},
+		{Name: "long", SLO: &config.SLO{Target: 99, WindowDays: 60}},
+		{Name: "none"},
+	}}
+	err := checkRetention(cfg, 35*24*time.Hour)
+	if err == nil || !strings.Contains(err.Error(), `"long"`) || strings.Contains(err.Error(), `"short"`) {
+		t.Fatalf("checkRetention = %v, want an error about check long only", err)
+	}
+}
+
 // TestMonitor runs the service against a real HTTP target and observes it
-// only through its logs and HTTP endpoints, as an operator would.
+// only through its logs, HTTP endpoints and history file, as an operator
+// would.
 func TestMonitor(t *testing.T) {
 	var holding atomic.Bool
 	entered := make(chan struct{}, 1)
@@ -88,8 +104,9 @@ func TestMonitor(t *testing.T) {
 	defer target.Close()
 	targetAddr := strings.TrimPrefix(target.URL, "http://")
 
-	path := filepath.Join(t.TempDir(), "checks.yaml")
-	web := "  - name: web\n    interval: 2s\n    timeout: 2s\n    http: {url: \"" + target.URL + "\"}\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "checks.yaml")
+	web := "  - name: web\n    interval: 2s\n    timeout: 2s\n    slo: {target: 99}\n    http: {url: \"" + target.URL + "\"}\n"
 	writeFile(t, path, "checks:\n"+web)
 	watcher, cfg, err := config.NewWatcher(path)
 	if err != nil {
@@ -107,13 +124,29 @@ func TestMonitor(t *testing.T) {
 	reload := make(chan os.Signal, 1)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	historyPath := filepath.Join(dir, "history.db")
+	retention := 35 * 24 * time.Hour
+	history, err := store.Open(t.Context(), historyPath, store.Options{Retention: retention, FlushInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Poll rarely so that reloads in this test happen only on SIGHUP.
-	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second}
+	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second,
+		retentionDays: 35, sloInterval: 50 * time.Millisecond}
+	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, reload: reload}
 	done := make(chan error, 1)
-	go func() { done <- monitor(ctx, ln, watcher, cfg, reload, o, logger) }()
+	go func() { done <- svc.serve(ctx, ln, cfg) }()
 
 	waitForStatus(t, base+"/readyz", http.StatusOK)
 	logs.waitFor(t, "a successful probe of web", func(e []logEntry) bool { return count(e, "probe succeeded", "web") > 0 })
+
+	// A probe flows through history and SLO evaluation into the metrics.
+	waitForMetrics(t, base, "web's SLO status", func(m string) bool {
+		return strings.Contains(m, `synthetic_probes_total{check="web",result="success"}`) &&
+			strings.Contains(m, `synthetic_slo_availability_ratio{check="web"} 1`) &&
+			strings.Contains(m, `synthetic_slo_error_budget_remaining_ratio{check="web"} 1`) &&
+			strings.Contains(m, `synthetic_check_info{check="web",type="http"} 1`)
+	})
 
 	// SIGHUP applies an edited config without a restart.
 	writeFile(t, path, "checks:\n"+web+"  - name: port\n    interval: 1s\n    tcp: {address: \""+targetAddr+"\"}\n")
@@ -128,6 +161,16 @@ func TestMonitor(t *testing.T) {
 	})
 	before := count(logs.entries(), "probe succeeded", "port")
 	logs.waitFor(t, "probes to continue after the rejection", func(e []logEntry) bool { return count(e, "probe succeeded", "port") > before })
+	waitForMetrics(t, base, "the rejection to be reported", func(m string) bool {
+		return strings.Contains(m, "synthetic_config_last_reload_successful 0")
+	})
+
+	// Removing a check removes its series once it has stopped.
+	writeFile(t, path, "checks:\n"+web)
+	reload <- syscall.SIGHUP
+	waitForMetrics(t, base, "the removed check's series to go", func(m string) bool {
+		return !strings.Contains(m, `check="port"`) && strings.Contains(m, "synthetic_config_last_reload_successful 1")
+	})
 
 	// Shutdown reports not ready and waits for the probe in flight.
 	holding.Store(true)
@@ -154,6 +197,39 @@ func TestMonitor(t *testing.T) {
 	}
 	if index(entries, "shutdown deadline reached") >= 0 {
 		t.Errorf("shutdown aborted probes, want them to finish")
+	}
+
+	// Every logged result, including the one in flight at shutdown, was
+	// written to history.
+	history, err = store.Open(t.Context(), historyPath, store.Options{Retention: retention})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer history.Close(context.Background())
+	for _, check := range []string{"web", "port"} {
+		total, _, err := history.Counts(t.Context(), check, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if logged := count(entries, "probe succeeded", check); total != logged {
+			t.Errorf("history holds %d results for %s, want the %d logged", total, check, logged)
+		}
+	}
+}
+
+// waitForMetrics polls /metrics until done reports true.
+func waitForMetrics(t *testing.T, base, what string, done func(string) bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, body, err := get(t.Context(), base+"/metrics")
+		if err == nil && status == http.StatusOK && done(body) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s; last /metrics:\n%s", what, body)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

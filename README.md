@@ -17,6 +17,8 @@ go run ./cmd/synthetic-monitor -config examples/checks.yaml -log-level debug
 |---|---|---|
 | `-config` | (required) | checks file, see [`examples/checks.yaml`](examples/checks.yaml) |
 | `-listen` | `:8080` | HTTP server address |
+| `-history` | `history.db` | SQLite file of probe results |
+| `-history-retention-days` | `35` | days of results kept; must cover every SLO window |
 | `-max-concurrent-probes` | `64` | cap on probes in flight across all checks |
 | `-config-poll-interval` | `5s` | how often the checks file is checked for changes |
 | `-shutdown-timeout` | `30s` | how long probes in flight get to finish after SIGTERM |
@@ -29,8 +31,36 @@ and probes in flight finish before the process exits.
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /metrics` | Prometheus metrics |
 | `GET /healthz` | liveness: the process is up |
 | `GET /readyz` | readiness: `503` once shutdown has started |
+
+### Metrics
+
+Per-check series are labelled only with `check`; join on
+`synthetic_check_info` for a check's `type`.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `synthetic_probes_total{check,result}` | counter | probes completed; `result` is `success` or the failure reason |
+| `synthetic_probe_success{check}` | gauge | 1 if the last probe succeeded |
+| `synthetic_probe_duration_seconds{check}` | histogram | probe duration |
+| `synthetic_probe_http_phase_duration_seconds{check,phase}` | histogram | HTTP time by phase: `dns`, `connect`, `tls`, `processing`, `transfer` |
+| `synthetic_tls_cert_expiry_timestamp_seconds{check}` | gauge | when the certificate chain stops verifying |
+| `synthetic_check_info{check,type}` | gauge | 1 per configured check |
+| `synthetic_slo_target_ratio{check}` | gauge | SLO target, e.g. `0.995` |
+| `synthetic_slo_availability_ratio{check}` | gauge | fraction of probes in the SLO window that succeeded |
+| `synthetic_slo_error_budget_remaining_ratio{check}` | gauge | error budget left; negative once overspent |
+| `synthetic_scheduler_lag_seconds` | histogram | how late probes started, mostly waiting for a free slot |
+| `synthetic_scheduler_skipped_runs_total{check}` | counter | runs skipped because an earlier probe overran |
+| `synthetic_probes_in_flight` | gauge | probes running now |
+| `synthetic_config_reloads_total{result}` | counter | config loads by `success` or `failure` |
+| `synthetic_config_last_reload_successful` | gauge | 0 while a rejected config is being ignored |
+| `synthetic_history_dropped_results_total` | counter | results not stored because the write queue was full |
+| `synthetic_history_write_errors_total` | counter | failed history writes |
+
+Failure reasons: `timeout`, `dns`, `connect`, `tls`, `cert_expiry`,
+`http_status`, `http_body`, `dns_answer`, `latency`, `other`.
 
 ## Development
 
@@ -227,3 +257,36 @@ would stall probes, distort their timings and turn a disk problem into
 false alerts about the targets. WAL mode lets the status page read while
 the writer writes, and old results are deleted in small chunks so pruning
 never holds the write lock for long.
+
+### SLOs are counted in probes and computed from history
+
+A check's availability is the fraction of its probes in the SLO window that
+succeeded, and its error budget is the number of failures the target allows
+over that window: a 99.5% target over 86,400 probes allows 432 failures. The
+budget's remaining fraction goes negative once it is overspent, so a dashboard
+shows by how much rather than stopping at zero.
+
+Counting probes rather than time keeps the maths exact and simple: every probe
+is one equal sample. Time when the monitor itself was down produces no probes,
+so it counts neither for nor against a check; the monitor cannot know what
+happened while it was not looking.
+
+The service computes SLOs from its own history every 30 seconds and exports
+the results as gauges, rather than leaving Grafana to compute them from
+counters with PromQL. A 30-day `increase()` needs Prometheus to retain 30 days
+of data (its default is 15) and makes the numbers depend on Prometheus having
+scraped without gaps. Computed from history, they survive restarts of either
+service, and the status page and the dashboard always agree.
+
+A config is rejected if a check's SLO window is longer than the history kept,
+since its SLO would silently be computed over less data than it claims.
+
+### Metrics carry only a check label
+
+Every per-check series is labelled with `check` and nothing else that can
+change; a check's type lives on `synthetic_check_info`. If `type` were a label
+on every series, a reload changing a check from TCP to HTTP would leave the
+TCP series behind, frozen at their last value. When a check is removed, its
+series are deleted once its last probe has finished; deleting them at the
+moment of the reload would let that probe recreate them, stale for good.
+Failure reasons are a fixed set of ten, so label cardinality stays bounded.

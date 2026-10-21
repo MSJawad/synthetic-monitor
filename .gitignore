@@ -1,2 +1,7 @@
 # Binary from `go build ./cmd/synthetic-monitor`
 /synthetic-monitor
+
+# Probe history from local runs
+*.db
+*.db-shm
+*.db-wal

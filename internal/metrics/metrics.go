@@ -13,6 +13,7 @@ import (
 
 	"github.com/MSJawad/synthetic-monitor/internal/config"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
+	"github.com/MSJawad/synthetic-monitor/internal/slo"
 )
 
 const namespace = "synthetic"
@@ -206,16 +207,10 @@ func (m *Metrics) ConfigLoaded(ok bool) {
 	m.lastReloadTimeOK.SetToCurrentTime()
 }
 
-// SLOStatus is a check's measured standing against its SLO.
-type SLOStatus struct {
-	Availability    float64
-	BudgetRemaining float64
-}
-
 // SetSLOStatus replaces the SLO status series with statuses, keyed by check.
 // Checks absent from statuses, such as those without data yet, lose their
 // series.
-func (m *Metrics) SetSLOStatus(statuses map[string]SLOStatus) {
+func (m *Metrics) SetSLOStatus(statuses map[string]slo.Status) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for name, s := range statuses {
