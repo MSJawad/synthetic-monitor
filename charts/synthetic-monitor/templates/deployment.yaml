@@ -55,19 +55,12 @@ spec:
             - -history-retention-days={{ .Values.monitor.historyRetentionDays }}
             - -config-poll-interval={{ .Values.monitor.configPollInterval }}
             - -shutdown-timeout={{ .Values.monitor.shutdownTimeoutSeconds }}s
-          {{- with .Values.ntfy.existingSecret }}
-          env:
-            - name: NTFY_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ . }}
-                  key: NTFY_URL
-            - name: NTFY_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ . }}
-                  key: NTFY_TOKEN
-                  optional: true
+          {{- with .Values.existingSecret }}
+          # Every key becomes an environment variable, so checks can refer
+          # to any secret in it as ${NAME} without a chart change.
+          envFrom:
+            - secretRef:
+                name: {{ . }}
           {{- end }}
           ports:
             - name: http

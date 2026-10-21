@@ -3,7 +3,7 @@ The status page and metrics:
   kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "synthetic-monitor.fullname" . }} 8080:{{ .Values.service.port }}
   open http://localhost:8080/
 
-{{- if not .Values.ntfy.existingSecret }}
+{{- if not .Values.existingSecret }}
 
-ntfy.existingSecret is not set, so notifications are only logged.
+existingSecret is not set, so notifications are only logged.
 {{- end }}

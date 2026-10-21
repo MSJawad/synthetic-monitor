@@ -115,10 +115,15 @@ as a single pod, with the history on a persistent volume.
 
 ```sh
 kubectl create namespace synthmon
-# Anyone who knows an ntfy topic can read it, so it is kept in a Secret.
-kubectl -n synthmon create secret generic ntfy --from-literal=NTFY_URL=https://ntfy.sh/<long-random-topic>
+# Every key in this Secret becomes an environment variable of the monitor:
+# the ntfy topic (anyone who knows it can read it), the heartbeat token, the
+# watchdog URL, and any ${NAME} the checks use.
+kubectl -n synthmon create secret generic synthetic-monitor \
+  --from-literal=NTFY_URL=https://ntfy.sh/<long-random-topic> \
+  --from-literal=HEARTBEAT_TOKEN="$(openssl rand -hex 32)" \
+  --from-literal=WATCHDOG_URL=https://hc-ping.com/<uuid>
 helm install synthetic-monitor charts/synthetic-monitor -n synthmon \
-  --set image.tag=<commit SHA> --set ntfy.existingSecret=ntfy -f examples/checks.yaml
+  --set image.tag=<commit SHA> --set existingSecret=synthetic-monitor -f examples/checks.yaml
 ```
 
 A checks file is also a values file: both keep the checks under `checks:`.
@@ -580,10 +585,16 @@ SQLite's temporary files.
 
 ### Secrets are referenced, never passed as values
 
-The chart takes the name of an existing Secret for the ntfy settings rather
-than the values themselves. Values files tend to end up in Git, and Helm
-stores every release's values in the cluster, so a topic passed as a value
-would leak in both places.
+The chart takes the name of an existing Secret rather than the secret values
+themselves. Values files tend to end up in Git, and Helm stores every
+release's values in the cluster, so an ntfy topic or a password passed as a
+value would leak in both places.
+
+Every key in that Secret becomes an environment variable (`envFrom`), rather
+than the chart listing the keys it expects. Checks can refer to any variable
+as `${NAME}`, so a fixed list would mean a chart change for every new check
+that needs a password. The cost is that anything put in the Secret is
+visible to the monitor, so it should be a Secret for the monitor alone.
 
 ### Chart values are validated
 

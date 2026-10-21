@@ -23,13 +23,7 @@
       }
     },
     "checks": {"type": "array", "items": {"type": "object"}},
-    "ntfy": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "existingSecret": {"type": "string"}
-      }
-    },
+    "existingSecret": {"type": "string"},
     "monitor": {
       "type": "object",
       "additionalProperties": false,

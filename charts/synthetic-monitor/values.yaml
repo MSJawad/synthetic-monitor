@@ -13,10 +13,13 @@ imagePullSecrets: []
 # usually within a minute, and the monitor applies it on its next poll.
 checks: []
 
-ntfy:
-  # Name of an existing Secret holding NTFY_URL and, optionally, NTFY_TOKEN.
-  # Without one, notifications are only logged.
-  existingSecret: ""
+# Name of an existing Secret whose keys all become environment variables:
+# NTFY_URL and NTFY_TOKEN for alerts, HEARTBEAT_TOKEN for heartbeat checks,
+# WATCHDOG_URL for the monitor's own dead man's switch, and any variable the
+# checks refer to as ${NAME}. Use a Secret for the monitor alone, since every
+# key in it is exposed to the monitor. Without one, notifications are only
+# logged and heartbeat checks are rejected.
+existingSecret: ""
 
 monitor:
   logLevel: info
