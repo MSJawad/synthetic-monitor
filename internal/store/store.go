@@ -80,6 +80,23 @@ var migrations = []string{
 	-- Covers SLO counts, which then never read the table itself.
 	CREATE INDEX results_by_check ON results (check_name, started_at, success);
 	CREATE INDEX results_by_time ON results (started_at);`,
+
+	`-- One row per check that is failing or firing; healthy checks have none.
+	CREATE TABLE alert_state (
+		check_name   TEXT    PRIMARY KEY,
+		firing       INTEGER NOT NULL,
+		streak       INTEGER NOT NULL,
+		streak_start INTEGER NOT NULL, -- Unix milliseconds, 0 if unset
+		firing_since INTEGER NOT NULL, -- Unix milliseconds, 0 if unset
+		last_reason  TEXT    NOT NULL,
+		last_error   TEXT    NOT NULL
+	) STRICT, WITHOUT ROWID;
+	-- The outbox: notifications are written with the state change that
+	-- caused them and deleted once delivered.
+	CREATE TABLE notifications (
+		id           INTEGER PRIMARY KEY,
+		notification TEXT    NOT NULL -- JSON
+	) STRICT;`,
 }
 
 // Open opens or creates the database at path, applies pending migrations,
