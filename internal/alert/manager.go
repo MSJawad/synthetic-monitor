@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -89,6 +90,11 @@ type Manager struct {
 	// Owned by the evaluating goroutine once it starts.
 	states     map[string]State
 	thresholds map[string]Thresholds
+
+	// firing mirrors which checks are firing, and since when, for readers
+	// on other goroutines.
+	firingMu sync.Mutex
+	firing   map[string]time.Time
 }
 
 // event is one thing for the evaluating goroutine to apply. Results and
@@ -129,6 +135,7 @@ func New(ctx context.Context, store Store, checks []config.Check, opts Options) 
 		sendDone:   make(chan struct{}),
 		states:     states,
 		thresholds: make(map[string]Thresholds),
+		firing:     make(map[string]time.Time),
 	}
 	m.setChecks(checks)
 
@@ -138,6 +145,7 @@ func New(ctx context.Context, store Store, checks []config.Check, opts Options) 
 		if _, configured := m.thresholds[name]; !configured {
 			m.forget(bg, name)
 		} else if s.Firing {
+			m.setFiring(name, s)
 			m.observer.Firing(name, true)
 		}
 	}
@@ -270,6 +278,7 @@ func (m *Manager) forget(ctx context.Context, check string) {
 		return
 	}
 	delete(m.states, check)
+	m.setFiring(check, State{})
 	if n != nil {
 		m.wakeSender()
 	}
@@ -282,8 +291,27 @@ func (m *Manager) setState(check string, prev, next State) {
 		m.states[check] = next
 	}
 	if prev.Firing != next.Firing {
+		m.setFiring(check, next)
 		m.observer.Firing(check, next.Firing)
 	}
+}
+
+func (m *Manager) setFiring(check string, s State) {
+	m.firingMu.Lock()
+	defer m.firingMu.Unlock()
+	if s.Firing {
+		m.firing[check] = s.FiringSince
+	} else {
+		delete(m.firing, check)
+	}
+}
+
+// Firing returns when the failures behind each firing alert began, keyed by
+// check. It is safe to call from any goroutine.
+func (m *Manager) Firing() map[string]time.Time {
+	m.firingMu.Lock()
+	defer m.firingMu.Unlock()
+	return maps.Clone(m.firing)
 }
 
 func (m *Manager) wakeSender() {

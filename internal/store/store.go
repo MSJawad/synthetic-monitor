@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver: pure Go, so no cgo
 
+	"github.com/MSJawad/synthetic-monitor/internal/probe"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
 )
 
@@ -320,4 +322,39 @@ func truncate(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// Sample is one stored probe result.
+type Sample struct {
+	Start    time.Time
+	Duration time.Duration
+	OK       bool
+	Reason   probe.Reason
+}
+
+// Recent returns check's last n results, oldest first.
+func (s *Store) Recent(ctx context.Context, check string, n int) ([]Sample, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT started_at, duration_us, success, reason FROM results
+		WHERE check_name = ? ORDER BY started_at DESC LIMIT ?`, check, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var samples []Sample
+	for rows.Next() {
+		var (
+			startMs, durationUs int64
+			sample              Sample
+			reason              string
+		)
+		if err := rows.Scan(&startMs, &durationUs, &sample.OK, &reason); err != nil {
+			return nil, err
+		}
+		sample.Start = time.UnixMilli(startMs).UTC()
+		sample.Duration = time.Duration(durationUs) * time.Microsecond
+		sample.Reason = probe.Reason(reason)
+		samples = append(samples, sample)
+	}
+	slices.Reverse(samples)
+	return samples, rows.Err()
 }

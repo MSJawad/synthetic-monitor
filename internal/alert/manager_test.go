@@ -24,8 +24,16 @@ func TestManagerAlertsOnceAndRecoversOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store, notifier, obs := newMemStore(), &fakeNotifier{}, &recorder{}
 		m := start(t, store, notifier, obs, check("web"))
-		feed(m, "web", "SFFFFFFSS")
+		feed(m, "web", "SFFF")
 		synctest.Wait()
+		if since, ok := m.Firing()["web"]; !ok || !since.Equal(time.Now().Add(-3*time.Second)) {
+			t.Errorf("Firing() = %v, want web firing since its first failure 3s ago", m.Firing())
+		}
+		feed(m, "web", "FFFSS")
+		synctest.Wait()
+		if f := m.Firing(); len(f) != 0 {
+			t.Errorf("Firing() = %v after recovery, want none", f)
+		}
 
 		if got := notifier.kinds(); got != "alert,recovery" {
 			t.Errorf("delivered %s, want alert,recovery", got)
@@ -135,6 +143,9 @@ func TestManagerRestartDuringIncidentDoesNotAlertAgain(t *testing.T) {
 		// A new process, with the target still down.
 		obs := &recorder{}
 		m = start(t, store, notifier, obs, check("web"))
+		if _, ok := m.Firing()["web"]; !ok {
+			t.Error("Firing() after restart lacks the saved alert")
+		}
 		if got := obs.firingChanges(); got != "web:true" {
 			t.Errorf("after restart, firing changes %q; want the saved alert reported as firing", got)
 		}

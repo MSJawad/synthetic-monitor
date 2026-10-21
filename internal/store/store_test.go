@@ -205,3 +205,31 @@ func BenchmarkWriteBatch(b *testing.B) {
 	}
 	b.ReportMetric(float64(b.N*maxBatch)/b.Elapsed().Seconds(), "results/s")
 }
+
+func TestRecentReturnsLatestOldestFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	s := open(t, path, Options{Retention: 100 * 365 * 24 * time.Hour})
+	for i := range 5 {
+		reason := probe.Reason("")
+		if i == 3 {
+			reason = probe.ReasonTimeout
+		}
+		s.Record(result("web", start.Add(time.Duration(i)*time.Minute), reason))
+	}
+	s.Record(result("other", start, ""))
+	closeStore(t, s)
+
+	s = open(t, path, Options{Retention: 100 * 365 * 24 * time.Hour})
+	defer closeStore(t, s)
+	got, err := s.Recent(t.Context(), "web", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || !got[0].Start.Equal(start.Add(2*time.Minute)) || !got[2].Start.Equal(start.Add(4*time.Minute)) {
+		t.Fatalf("Recent = %+v, want the last 3 of web's 5 results, oldest first", got)
+	}
+	if !got[0].OK || got[1].OK || got[1].Reason != probe.ReasonTimeout || got[1].Duration != 42*time.Millisecond {
+		t.Errorf("Recent = %+v, want the timeout as the second result, with durations kept", got)
+	}
+}
