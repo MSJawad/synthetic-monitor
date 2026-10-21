@@ -41,3 +41,62 @@ jobs:
           go-version-file: go.mod
       # -shuffle surfaces tests that only pass in a particular order.
       - run: go test -race -shuffle=on -count=1 ./...
+
+  chart:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the Helm chart
+        run: helm lint --strict charts/synthetic-monitor --set image.tag=ci
+      # Renders every template, with the example checks as values and the
+      # optional resources on, and checks the dashboard is valid JSON.
+      - name: Render the Helm chart
+        run: |
+          helm template synthetic-monitor charts/synthetic-monitor -f examples/checks.yaml \
+            --set image.tag=ci --set serviceMonitor.enabled=true --set grafanaDashboard.enabled=true > /dev/null
+          jq empty charts/synthetic-monitor/dashboards/synthetic-monitor.json
+
+  image:
+    needs: [lint, test, chart]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/msjawad/synthetic-monitor
+      # Pull requests only check that the image builds; pushes to main
+      # publish it, tagged with the commit SHA.
+      PUSH: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create a BuildKit builder
+        # The default builder can only build for one platform at a time; a
+        # docker-container builder builds both into one multi-platform image.
+        # Its BuildKit image is pinned for the same reason the actions are.
+        run: >-
+          docker buildx create --use --driver docker-container
+          --driver-opt image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the image for arm64 and amd64
+        run: >-
+          docker buildx build .
+          --platform linux/arm64,linux/amd64
+          --tag "$IMAGE:$GITHUB_SHA"
+          --output type=image,push=$PUSH
+      - name: Check the registry has both platforms
+        if: env.PUSH == 'true'
+        # Reads back what the registry stores. Build attestations are listed
+        # with platform unknown/unknown, so they are left out.
+        run: |
+          platforms=$(docker buildx imagetools inspect "$IMAGE:$GITHUB_SHA" --format '{{json .Manifest}}' \
+            | jq -r '[.manifests[].platform | select(.os != "unknown") | "\(.os)/\(.architecture)"] | sort | join(",")')
+          echo "Published platforms: $platforms"
+          test "$platforms" = "linux/amd64,linux/arm64"
