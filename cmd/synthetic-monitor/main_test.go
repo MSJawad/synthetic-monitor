@@ -9,7 +9,13 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 func TestHealthz(t *testing.T) {
 	rec := httptest.NewRecorder()
