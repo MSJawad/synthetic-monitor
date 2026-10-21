@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,9 +14,10 @@ import (
 )
 
 // BenchmarkProbe runs each probe type against a server on the same machine,
-// from GOMAXPROCS goroutines at once. probes/s is the throughput one machine
-// sustains for that type, including the server's share of the work, and
-// allocs/op shows the garbage each probe creates. Run it with a fixed count:
+// 64 probes at a time, the service's default -max-concurrent-probes.
+// probes/s is the throughput one machine sustains for that type, including
+// the server's share of the work, and allocs/op shows the garbage each
+// probe creates. Run it with a fixed count:
 //
 //	go test -run '^$' -bench BenchmarkProbe -benchtime 5000x ./internal/probe
 //
@@ -50,6 +52,7 @@ func BenchmarkProbe(b *testing.B) {
 			c.check.Name, c.check.Interval, c.check.Timeout = "bench", time.Minute, 10*time.Second
 			p := New(c.check, Options{RootCAs: ca.pool})
 			b.ReportAllocs()
+			b.SetParallelism(max(1, 64/runtime.GOMAXPROCS(0)))
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
 					if r := p.Probe(b.Context()); !r.OK() {
