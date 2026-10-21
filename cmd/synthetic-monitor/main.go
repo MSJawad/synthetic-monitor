@@ -24,6 +24,7 @@ import (
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
 	"github.com/MSJawad/synthetic-monitor/internal/slo"
 	"github.com/MSJawad/synthetic-monitor/internal/store"
+	"github.com/MSJawad/synthetic-monitor/internal/web"
 )
 
 func main() {
@@ -199,10 +200,19 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	logger.Info("config loaded", "version", cfg.Version, "checks", len(cfg.Checks))
 	apply(cfg)
 
+	var slos atomic.Pointer[map[string]slo.Status]
+	slos.Store(&map[string]slo.Status{})
+	status := web.Handler(web.Source{
+		Checks: func() []config.Check { return current.Load().Checks },
+		Recent: s.history.Recent,
+		SLOs:   func() map[string]slo.Status { return *slos.Load() },
+		Firing: alerts.Firing,
+	}, logger)
+
 	var ready atomic.Bool
 	ready.Store(true)
 	srv := &http.Server{
-		Handler:           newMux(&ready, m.Handler()),
+		Handler:           newMux(&ready, m.Handler(), status),
 		ReadHeaderTimeout: 5 * time.Second, // bounds clients that send headers slowly to hold connections open
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -231,7 +241,10 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	background.Go(func() {
 		slo.Run(bgCtx, s.opts.sloInterval, s.history,
 			func() []config.Check { return current.Load().Checks },
-			m.SetSLOStatus, logger)
+			func(statuses map[string]slo.Status) {
+				m.SetSLOStatus(statuses)
+				slos.Store(&statuses)
+			}, logger)
 	})
 
 	select {
@@ -265,8 +278,9 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	return err
 }
 
-func newMux(ready *atomic.Bool, metrics http.Handler) *http.ServeMux {
+func newMux(ready *atomic.Bool, metrics, status http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.Handle("/", status)
 	mux.Handle("GET /metrics", metrics)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")

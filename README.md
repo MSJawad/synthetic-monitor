@@ -39,6 +39,8 @@ and probes in flight finish before the process exits.
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /` | status page |
+| `GET /api/status` | the status page's data as JSON |
 | `GET /metrics` | Prometheus metrics |
 | `GET /healthz` | liveness: the process is up |
 | `GET /readyz` | readiness: `503` once shutdown has started |
@@ -355,3 +357,32 @@ A check removed from the config while its alert is firing would otherwise
 never recover, leaving an incident open forever. Instead it gets a removal
 notice once its last probe has finished, including checks removed while the
 monitor was down, which are resolved at the next start.
+
+### The status page is server-rendered and runs no JavaScript
+
+The page is an `html/template` embedded in the binary. Charts are inline SVG
+computed on the server, tooltips are SVG `<title>` elements, and the page
+reloads itself every 30 seconds. Without scripts there is nothing to build or
+bundle, it works with JavaScript disabled, and its Content-Security-Policy
+can forbid scripts and inline styles outright, which removes cross-site
+scripting as a class of bug. The cost is a full reload to refresh and plain
+browser tooltips; every value is also in a "Recent probes" table, so nothing
+is reachable only by hovering.
+
+It shows check names, never their targets or raw error messages, because a
+public status page should not reveal internal hostnames and addresses.
+Failures are described by reason ("Connection failed", "Timed out").
+
+A few details that are easy to get wrong:
+
+- Availability is rounded *down*, so 99.996% shows as 99.995%, never as 100%.
+- An exhausted error budget is described in probes ("12 failed probes, 1
+  allowed"), because a percentage over a short window reads "overspent by
+  35966%".
+- The sparkline positions points by percentage of its width instead of
+  scaling a `viewBox`, so its 2px line and round end dot stay undistorted at
+  any width. Each of the last 60 probes has a fixed slot, so a new check fills
+  in from the right rather than stretching three probes across the chart.
+- Colours come from a palette validated for colour-vision deficiency in both
+  light and dark mode, and status colours always come with an icon and a
+  label, never colour alone.

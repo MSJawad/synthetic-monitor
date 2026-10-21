@@ -56,7 +56,7 @@ func TestParseFlags(t *testing.T) {
 
 func TestHealthAndReadiness(t *testing.T) {
 	var ready atomic.Bool
-	mux := newMux(&ready, http.NotFoundHandler())
+	mux := newMux(&ready, http.NotFoundHandler(), http.NotFoundHandler())
 	status := func(path string) int {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
@@ -150,6 +150,17 @@ func TestMonitor(t *testing.T) {
 			strings.Contains(m, `synthetic_slo_error_budget_remaining_ratio{check="web"} 1`) &&
 			strings.Contains(m, `synthetic_check_info{check="web",type="http"} 1`)
 	})
+
+	// The status page and its JSON show the check, without its target.
+	status, page, err := get(t.Context(), base+"/")
+	if err != nil || status != http.StatusOK || !strings.Contains(page, `<h2 class="check-name">web</h2>`) ||
+		strings.Contains(page, target.URL) {
+		t.Errorf("GET / = %d, %v; want the status page naming web but not its URL", status, err)
+	}
+	status, body, err := get(t.Context(), base+"/api/status")
+	if err != nil || status != http.StatusOK || !strings.Contains(body, `"name":"web","type":"http","state":"up"`) {
+		t.Errorf("GET /api/status = %d %s, %v; want web up", status, body, err)
+	}
 
 	// SIGHUP applies an edited config without a restart.
 	writeFile(t, path, "checks:\n"+web+"  - name: port\n    interval: 1s\n    tcp: {address: \""+targetAddr+"\"}\n")
