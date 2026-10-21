@@ -167,12 +167,12 @@ misspelled ones are rejected.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/grafana-dashboard-dark.png">
   <img src="docs/images/grafana-dashboard-light.png" width="720"
-       alt="The Grafana dashboard during a test outage: summary numbers, a timeline in which two checks go from up to failing, down and recovering and back to up, SLO and certificate tables, a small latency chart per check, stacked HTTP phase timings, and the monitor's own health.">
+       alt="The Grafana dashboard during a staged test: summary numbers; a timeline in which an API check goes from up to failing, down and recovering and back to up, and a heartbeat check goes down once its job stops pinging; SLO, certificate and heartbeat tables; a latency chart per check; stacked HTTP phase timings; and the monitor's own health.">
 </picture>
 
-The dashboard during a test outage on a local cluster: the demo app behind
-two checks was stopped for about two minutes, and each check went from up to
-failing, down (alert sent), recovering and up again (recovery sent).
+The dashboard during a staged test: the API's health check failed for a
+minute, going from up to failing, down (alert sent), recovering and up again
+(recovery sent), and a job behind a heartbeat check stopped pinging.
 
 ## Performance
 
@@ -646,6 +646,8 @@ more than a handful of lines would need more colours than can be told apart.
 The charts show the mean, computed exactly from the histogram's sum and
 count: with a few probes a minute per check, a percentile estimated from
 histogram buckets would mostly report where the bucket boundaries are.
+Heartbeat checks get no latency chart, since they are pinged rather than
+timed; a table beside the SLOs shows how long ago each was last pinged.
 
 The state timeline combines two metrics into the status page's four states:
 `2 * alert_firing + 1 - probe_success` is 0 when up, 1 when failing below the
