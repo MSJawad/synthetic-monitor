@@ -135,8 +135,16 @@ func (s *Scheduler) Apply(checks []config.Check) {
 		}
 		s.runners[c.Name] = s.start(c, replaced[c.Name])
 	}
-	s.logger.Info("checks applied", "added", added, "updated", updated, "removed", removed,
-		"unchanged", len(s.runners)-len(added)-len(updated))
+	attrs := []any{"unchanged", len(s.runners) - len(added) - len(updated)}
+	for _, change := range []struct {
+		key   string
+		names []string
+	}{{"added", added}, {"updated", updated}, {"removed", removed}} {
+		if len(change.names) > 0 {
+			attrs = append(attrs, change.key, change.names)
+		}
+	}
+	s.logger.Info("checks applied", attrs...)
 }
 
 // Stop stops scheduling probes and waits for those in flight to finish. If
@@ -167,6 +175,12 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 // start launches a runner for c. If after is not nil, the runner waits for
 // it to close before scheduling, so a replaced check's last probe finishes
 // before its replacement's first one starts.
+//
+// The runner's context derives from the scheduler's own, not a caller's:
+// the scheduler's lifetime is governed by Stop, not by whoever applies a
+// config.
+//
+//nolint:contextcheck // see above
 func (s *Scheduler) start(c config.Check, after <-chan struct{}) *runner {
 	ctx, stop := context.WithCancel(s.scheduling)
 	r := &runner{check: c, prober: s.newProber(c), stop: stop, done: make(chan struct{})}
