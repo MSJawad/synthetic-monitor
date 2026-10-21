@@ -73,6 +73,8 @@ func New(c config.Check, opts Options) Prober {
 	switch {
 	case c.HTTP != nil:
 		p = newHTTP(c.HTTP, opts)
+	case c.TCP != nil:
+		p = &tcpProber{address: c.TCP.Address}
 	default:
 		panic(fmt.Sprintf("probe: check %q has no probe type", c.Name))
 	}
