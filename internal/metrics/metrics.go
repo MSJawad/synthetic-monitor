@@ -194,6 +194,10 @@ func (m *Metrics) SetChecks(checks []config.Check) {
 	for _, c := range checks {
 		types[c.Name] = c.Type()
 		m.checkInfo.WithLabelValues(c.Name, c.Type()).Set(1)
+		// Exported as 0 until the check's alert fires, so "not firing" is a
+		// value queries can see rather than a missing series. An alert
+		// already firing keeps its 1.
+		m.alertFiring.WithLabelValues(c.Name)
 		if c.SLO != nil {
 			m.sloTarget.WithLabelValues(c.Name).Set(c.SLO.Ratio())
 		} else {

@@ -90,7 +90,7 @@ Per-check series are labelled only with `check`; join on
 | `synthetic_config_last_reload_successful` | gauge | 0 while a rejected config is being ignored |
 | `synthetic_history_dropped_results_total` | counter | results not stored because the write queue was full |
 | `synthetic_history_write_errors_total` | counter | failed history writes |
-| `synthetic_alert_firing{check}` | gauge | 1 from the alert until the recovery notice |
+| `synthetic_alert_firing{check}` | gauge | 1 from the alert until the recovery notice, otherwise 0 |
 | `synthetic_notifications_delivered_total{kind}` | counter | notifications accepted by ntfy: `alert`, `recovery`, `removed` |
 | `synthetic_notification_delivery_failures_total{kind,permanent}` | counter | failed deliveries; `permanent="true"` ones were given up on |
 | `synthetic_notifications_pending` | gauge | notifications saved but not yet delivered |

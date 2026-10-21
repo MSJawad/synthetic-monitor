@@ -131,6 +131,22 @@ synthetic_check_info{check="a",type="http"} 1
 	}
 }
 
+func TestSetChecksExportsAlertsNotFiring(t *testing.T) {
+	m := New()
+	m.AlertObserver().Firing("down", true)
+	m.SetChecks([]config.Check{{Name: "down", TCP: &config.TCP{}}, {Name: "up", TCP: &config.TCP{}}})
+
+	want := `
+# HELP synthetic_alert_firing 1 while the check's alert is firing: from the alert until the recovery notice.
+# TYPE synthetic_alert_firing gauge
+synthetic_alert_firing{check="down"} 1
+synthetic_alert_firing{check="up"} 0
+`
+	if err := testutil.CollectAndCompare(m.registry, strings.NewReader(want), "synthetic_alert_firing"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSetSLOStatusReplacesSeries(t *testing.T) {
 	m := New()
 	m.SetSLOStatus(map[string]slo.Status{"a": {Availability: 0.99, BudgetRemaining: 0.5}, "b": {Availability: 1, BudgetRemaining: 1}})
