@@ -56,7 +56,7 @@ func TestParseFlags(t *testing.T) {
 
 func TestHealthAndReadiness(t *testing.T) {
 	var ready atomic.Bool
-	mux := newMux(&ready, http.NotFoundHandler(), http.NotFoundHandler())
+	mux := newMux(&ready, http.NotFoundHandler(), http.NotFoundHandler(), nil)
 	status := func(path string) int {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
@@ -81,15 +81,23 @@ func TestDebugMuxServesLeakProfile(t *testing.T) {
 	}
 }
 
-func TestCheckRetention(t *testing.T) {
+func TestCheckConfig(t *testing.T) {
 	cfg := &config.Config{Checks: []config.Check{
 		{Name: "short", SLO: &config.SLO{Target: 99, WindowDays: 30}},
 		{Name: "long", SLO: &config.SLO{Target: 99, WindowDays: 60}},
 		{Name: "none"},
 	}}
-	err := checkRetention(cfg, 35*24*time.Hour)
+	err := checkConfig(cfg, 35*24*time.Hour, "")
 	if err == nil || !strings.Contains(err.Error(), `"long"`) || strings.Contains(err.Error(), `"short"`) {
-		t.Fatalf("checkRetention = %v, want an error about check long only", err)
+		t.Fatalf("checkConfig = %v, want an error about check long only", err)
+	}
+
+	cfg = &config.Config{Checks: []config.Check{{Name: "cron", Heartbeat: &config.Heartbeat{Every: time.Hour}}}}
+	if err := checkConfig(cfg, time.Hour, ""); err == nil || !strings.Contains(err.Error(), "HEARTBEAT_TOKEN") {
+		t.Errorf("heartbeat check without a token: checkConfig = %v, want an error naming HEARTBEAT_TOKEN", err)
+	}
+	if err := checkConfig(cfg, time.Hour, "s3cr3t"); err != nil {
+		t.Errorf("heartbeat check with a token: checkConfig = %v", err)
 	}
 }
 
@@ -323,6 +331,118 @@ func TestShutdownDeadline(t *testing.T) {
 	}
 }
 
+// TestHeartbeats pings a heartbeat check over HTTP, lets it go overdue, and
+// restarts the monitor to show the last ping is remembered.
+func TestHeartbeats(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "checks.yaml")
+	writeFile(t, path, "checks:\n  - name: cron\n    interval: 1s\n    failure_threshold: 1\n"+
+		"    heartbeat: {every: 2s, grace: 500ms}\n")
+	historyPath := filepath.Join(dir, "history.db")
+
+	type running struct {
+		base   string
+		logs   *logBuffer
+		cancel context.CancelFunc
+		done   chan error
+	}
+	start := func() *running {
+		watcher, cfg, err := config.NewWatcher(path, os.LookupEnv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		history, err := store.Open(t.Context(), historyPath, store.Options{Retention: 24 * time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		logs := &logBuffer{}
+		logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		var lc net.ListenConfig
+		ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 5 * time.Second,
+			flushTimeout: 5 * time.Second, retentionDays: 1, sloInterval: time.Minute}
+		svc := &service{opts: o, logger: logger, watcher: watcher, history: history,
+			notifier: alert.LogNotifier{Logger: logger}, reload: make(chan os.Signal), heartbeatToken: "s3cr3t"}
+		ctx, cancel := context.WithCancel(t.Context())
+		m := &running{base: "http://" + ln.Addr().String(), logs: logs, cancel: cancel, done: make(chan error, 1)}
+		go func() { m.done <- svc.serve(ctx, ln, cfg) }()
+		waitForStatus(t, m.base+"/readyz", http.StatusOK)
+		return m
+	}
+	stop := func(m *running) {
+		m.cancel()
+		if err := <-m.done; err != nil {
+			t.Fatalf("monitor = %v", err)
+		}
+	}
+	ping := func(m *running, token string) int {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, m.base+"/heartbeat/cron", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	lastPing := func(m *running) string {
+		_, body, err := get(t.Context(), m.base+"/api/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status struct {
+			Checks []struct {
+				LastPing string `json:"last_ping"`
+			} `json:"checks"`
+		}
+		if err := json.Unmarshal([]byte(body), &status); err != nil || len(status.Checks) != 1 {
+			t.Fatalf("GET /api/status = %s, %v", body, err)
+		}
+		return status.Checks[0].LastPing
+	}
+
+	m := start()
+	if code := ping(m, "guess"); code != http.StatusUnauthorized {
+		t.Errorf("ping with the wrong token: status %d, want 401", code)
+	}
+	if code := ping(m, "s3cr3t"); code != http.StatusNoContent {
+		t.Fatalf("ping: status %d, want 204", code)
+	}
+	m.logs.waitFor(t, "a passing run of cron", func(e []logEntry) bool { return count(e, "probe succeeded", "cron") > 0 })
+	pinged := lastPing(m)
+	if pinged == "" {
+		t.Fatal("/api/status shows no last_ping after a ping")
+	}
+	waitForMetrics(t, m.base, "the last ping metric", func(s string) bool {
+		return strings.Contains(s, `synthetic_heartbeat_last_ping_timestamp_seconds{check="cron"}`)
+	})
+
+	// No more pings: once every plus grace has passed, the check fails.
+	m.logs.waitFor(t, "cron to go overdue", func(e []logEntry) bool {
+		for _, entry := range e {
+			if entry.Msg == "probe failed" && entry.Check == "cron" && entry.Reason == "heartbeat_missed" {
+				return true
+			}
+		}
+		return false
+	})
+	stop(m)
+
+	// A restart remembers the last ping rather than starting the clock again.
+	m = start()
+	defer stop(m)
+	if got := lastPing(m); got != pinged {
+		t.Errorf("after a restart, last_ping = %q, want %q", got, pinged)
+	}
+}
+
 // waitForMetrics polls /metrics until done reports true.
 func waitForMetrics(t *testing.T, base, what string, done func(string) bool) {
 	t.Helper()
@@ -389,6 +509,7 @@ type logEntry struct {
 	Msg    string `json:"msg"`
 	Check  string `json:"check"`
 	Probes int    `json:"probes"`
+	Reason string `json:"reason"`
 }
 
 func (b *logBuffer) Write(p []byte) (int, error) {

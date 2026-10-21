@@ -41,7 +41,7 @@ type Config struct {
 }
 
 // Check is one endpoint probed on a schedule. Exactly one of HTTP, TCP, DNS,
-// TLS and Steps is set, and it determines the check's type.
+// TLS, Steps and Heartbeat is set, and it determines the check's type.
 type Check struct {
 	// Name identifies the check across config reloads and in metrics,
 	// history and alerts, so renaming a check starts it from scratch.
@@ -66,6 +66,9 @@ type Check struct {
 	// Steps, if set, makes the check a sequence of HTTP requests, such as
 	// signing in and then fetching a page with the session.
 	Steps []Step `yaml:"steps"`
+	// Heartbeat, if set, makes the check wait for pings instead of sending
+	// probes.
+	Heartbeat *Heartbeat `yaml:"heartbeat"`
 }
 
 // SLO is an availability objective: at least Target percent of probes
@@ -120,6 +123,16 @@ type Step struct {
 	Extract map[string]string `yaml:"extract"`
 }
 
+// Heartbeat checks that something, typically a scheduled job the monitor
+// cannot reach, pings the monitor at least every Every, with Grace to
+// spare. Each run of the check passes if the last ping is recent enough.
+type Heartbeat struct {
+	Every time.Duration `yaml:"every"`
+	// Grace allows for jobs that start late or run long. It defaults to a
+	// tenth of Every, and at least a minute.
+	Grace time.Duration `yaml:"grace"`
+}
+
 // TCP checks that a TCP connection to Address (host:port) can be opened.
 type TCP struct {
 	Address string `yaml:"address"`
@@ -146,11 +159,13 @@ type TLS struct {
 }
 
 // Type returns the name of the check's probe type: "http", "tcp", "dns",
-// "tls" or "steps".
+// "tls", "steps" or "heartbeat".
 func (c Check) Type() string {
 	switch {
 	case len(c.Steps) > 0:
 		return "steps"
+	case c.Heartbeat != nil:
+		return "heartbeat"
 	case c.HTTP != nil:
 		return "http"
 	case c.TCP != nil:
@@ -209,6 +224,9 @@ func (c *Check) applyDefaults() {
 	}
 	for i := range c.Steps {
 		c.Steps[i].applyDefaults()
+	}
+	if c.Heartbeat != nil && c.Heartbeat.Grace == 0 {
+		c.Heartbeat.Grace = max(time.Minute, c.Heartbeat.Every/10)
 	}
 	if c.DNS != nil && c.DNS.Server != "" {
 		if _, _, err := net.SplitHostPort(c.DNS.Server); err != nil {
@@ -277,13 +295,13 @@ func (cfg *Config) validate(env Env) error {
 		}
 
 		types := 0
-		for _, set := range []bool{c.HTTP != nil, c.TCP != nil, c.DNS != nil, c.TLS != nil, len(c.Steps) > 0} {
+		for _, set := range []bool{c.HTTP != nil, c.TCP != nil, c.DNS != nil, c.TLS != nil, len(c.Steps) > 0, c.Heartbeat != nil} {
 			if set {
 				types++
 			}
 		}
 		if types != 1 {
-			fail("exactly one of http, tcp, dns, tls or steps must be set, found %d", types)
+			fail("exactly one of http, tcp, dns, tls, steps or heartbeat must be set, found %d", types)
 			continue
 		}
 
@@ -295,6 +313,16 @@ func (cfg *Config) validate(env Env) error {
 		case len(c.Steps) > 0:
 			for _, err := range validateSteps(c.Steps, env) {
 				fail("%v", err)
+			}
+		case c.Heartbeat != nil:
+			if c.Heartbeat.Every < MinInterval {
+				fail("heartbeat.every %v is below the minimum of %v", c.Heartbeat.Every, MinInterval)
+			}
+			if c.Heartbeat.Grace < 0 {
+				fail("heartbeat.grace %v must not be negative", c.Heartbeat.Grace)
+			}
+			if c.MaxLatency != 0 {
+				fail("max_latency does not apply to heartbeat checks")
 			}
 		case c.TCP != nil:
 			if err := checkHostPort(c.TCP.Address); err != nil {

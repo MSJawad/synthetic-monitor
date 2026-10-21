@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,31 @@ synthetic_check_info{check="a",type="http"} 1
 	}
 }
 
+func TestHeartbeatChecks(t *testing.T) {
+	m := New()
+	r := result("cron", "")
+	r.Type = "heartbeat"
+	m.Record(r)
+	m.Pinged("cron", t0)
+
+	want := fmt.Sprintf(`
+# HELP synthetic_heartbeat_last_ping_timestamp_seconds When the heartbeat check was last pinged, as a Unix timestamp.
+# TYPE synthetic_heartbeat_last_ping_timestamp_seconds gauge
+synthetic_heartbeat_last_ping_timestamp_seconds{check="cron"} %d
+`, t0.Unix())
+	if err := testutil.CollectAndCompare(m.registry, strings.NewReader(want), "synthetic_heartbeat_last_ping_timestamp_seconds"); err != nil {
+		t.Fatal(err)
+	}
+	// Looking up a ping takes no time worth measuring, so no duration is
+	// recorded, but the result is counted.
+	if n := testutil.CollectAndCount(m.registry, "synthetic_probe_duration_seconds"); n != 0 {
+		t.Errorf("%d duration series for a heartbeat check, want 0", n)
+	}
+	if got := testutil.ToFloat64(m.probes.WithLabelValues("cron", "success")); got != 1 {
+		t.Errorf("probes_total = %v, want 1", got)
+	}
+}
+
 func TestSetChecksExportsAlertsNotFiring(t *testing.T) {
 	m := New()
 	m.AlertObserver().Firing("down", true)
@@ -175,6 +201,7 @@ func TestForgetDeletesEveryCheckSeries(t *testing.T) {
 		m.Record(r)
 		m.Skipped(name, 1)
 		m.AlertObserver().Firing(name, true)
+		m.Pinged(name, t0)
 	}
 	m.SetChecks([]config.Check{
 		{Name: "gone", TCP: &config.TCP{}, SLO: &config.SLO{Target: 99, WindowDays: 1}},

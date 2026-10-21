@@ -28,7 +28,7 @@
 
       <div class="metrics">
         <section class="metric">
-          <h3 class="metric-label">Latency</h3>
+          <h3 class="metric-label">{{if .Heartbeat}}Last ping{{else}}Latency{{end}}</h3>
           {{- if .Latency}}
           <p class="metric-value">{{.Latency}}{{with .Note}}<span class="metric-aside">{{.}}</span>{{end}}</p>
           {{- else}}
@@ -78,10 +78,11 @@
       <details class="probes">
         <summary>Recent probes</summary>
         <table>
-          <thead><tr><th scope="col">Time</th><th scope="col">Result</th><th scope="col" class="num">Latency</th></tr></thead>
+          {{- $timed := not .Heartbeat}}
+          <thead><tr><th scope="col">Time</th><th scope="col">Result</th>{{if $timed}}<th scope="col" class="num">Latency</th>{{end}}</tr></thead>
           <tbody>
           {{- range .Probes}}
-            <tr{{if not .OK}} class="failed"{{end}}><td>{{.Time}}</td><td>{{.Result}}</td><td class="num">{{.Latency}}</td></tr>
+            <tr{{if not .OK}} class="failed"{{end}}><td>{{.Time}}</td><td>{{.Result}}</td>{{if $timed}}<td class="num">{{.Latency}}</td>{{end}}</tr>
           {{- end}}
           </tbody>
         </table>

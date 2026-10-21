@@ -51,6 +51,7 @@ topic can live in a secret:
 |---|---|
 | `NTFY_URL` | topic to publish to, e.g. `https://ntfy.sh/<long-random-topic>`; without it, notifications are only logged |
 | `NTFY_TOKEN` | optional bearer token, for protected topics or self-hosted servers |
+| `HEARTBEAT_TOKEN` | token jobs send to ping heartbeat checks; required if there are any |
 
 Edits to the checks file are applied within one poll interval, or at once on
 `SIGHUP`. An invalid file is rejected and logged, and the previous checks keep
@@ -66,6 +67,7 @@ exits.
 | `GET /metrics` | Prometheus metrics |
 | `GET /healthz` | liveness: the process is up |
 | `GET /readyz` | readiness: `503` once shutdown has started |
+| `POST /heartbeat/{check}` | ping a heartbeat check, with `Authorization: Bearer $HEARTBEAT_TOKEN`; `204` once saved |
 
 ### Metrics
 
@@ -79,6 +81,7 @@ Per-check series are labelled only with `check`; join on
 | `synthetic_probe_duration_seconds{check}` | histogram | probe duration |
 | `synthetic_probe_http_phase_duration_seconds{check,phase}` | histogram | HTTP time by phase: `dns`, `connect`, `tls`, `processing`, `transfer` |
 | `synthetic_tls_cert_expiry_timestamp_seconds{check}` | gauge | when the certificate chain stops verifying |
+| `synthetic_heartbeat_last_ping_timestamp_seconds{check}` | gauge | when a heartbeat check was last pinged |
 | `synthetic_check_info{check,type}` | gauge | 1 per configured check |
 | `synthetic_slo_target_ratio{check}` | gauge | SLO target, e.g. `0.995` |
 | `synthetic_slo_availability_ratio{check}` | gauge | fraction of probes in the SLO window that succeeded |
@@ -97,7 +100,8 @@ Per-check series are labelled only with `check`; join on
 | `synthetic_alert_dropped_results_total` | counter | results not evaluated for alerting because its queue was full |
 
 Failure reasons: `timeout`, `dns`, `connect`, `tls`, `cert_expiry`,
-`http_status`, `http_body`, `dns_answer`, `latency`, `other`.
+`http_status`, `http_body`, `dns_answer`, `latency`, `heartbeat_missed`,
+`other`.
 
 ## Deploying
 
@@ -648,3 +652,28 @@ error. Extraction errors name the path that was missing, never the values
 around it, because a response to a sign-in is full of secrets. A run shares
 one timeout across all its steps, since the question is whether the journey
 as a whole works in time.
+
+### Heartbeat checks: the job reports in, and silence is the failure
+
+Some things cannot be probed: a scheduled job on a private network has no
+address to call, and the dangerous failure is not an error but the job
+quietly not running. A heartbeat check inverts the probe: the job sends
+`POST /heartbeat/{check}` when it finishes, and the check fails once the
+last ping is older than its period plus a grace allowance. Missing data is
+the alarm, which is exactly what log-based alarms treat as all clear.
+
+The check is still run by the scheduler on its interval, so heartbeats reuse
+everything else: thresholds, alerting, SLOs, history and the status page,
+where they show when the last ping came instead of a latency. Until the
+first ping, the clock starts when the check does, so a job that never pings
+fails rather than staying grey forever.
+
+- **The ping is saved before it is acknowledged.** A `204` means the ping is
+  in SQLite and survives a restart; if it cannot be saved the job gets a
+  `503` and can retry. Without that, a redeploy just after a daily job would
+  forget its ping and raise a false alarm a day later.
+- **Grace defaults to a tenth of the period, and at least a minute,** which
+  absorbs jobs that start late or run long without tuning each check.
+- **One bearer token for all pings, checked before the name,** so a caller
+  without it cannot discover which checks exist. A token in the URL, the
+  common alternative, would end up in access logs.

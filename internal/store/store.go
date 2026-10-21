@@ -99,6 +99,12 @@ var migrations = []string{
 		id           INTEGER PRIMARY KEY,
 		notification TEXT    NOT NULL -- JSON
 	) STRICT;`,
+
+	`-- When each heartbeat check was last pinged.
+	CREATE TABLE heartbeats (
+		check_name TEXT    PRIMARY KEY,
+		last_ping  INTEGER NOT NULL -- Unix milliseconds
+	) STRICT, WITHOUT ROWID;`,
 }
 
 // Open opens or creates the database at path, applies pending migrations,

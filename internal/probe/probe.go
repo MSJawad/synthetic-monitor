@@ -22,17 +22,18 @@ type Reason string
 
 // Reasons a probe can fail.
 const (
-	ReasonTimeout    Reason = "timeout"     // the check's timeout expired
-	ReasonCanceled   Reason = "canceled"    // the caller cancelled the probe, e.g. at shutdown; says nothing about the target
-	ReasonDNS        Reason = "dns"         // name resolution failed
-	ReasonConnect    Reason = "connect"     // the TCP connection was refused or the host was unreachable
-	ReasonTLS        Reason = "tls"         // the TLS handshake or certificate verification failed
-	ReasonCertExpiry Reason = "cert_expiry" // the certificate chain is valid but expires too soon
-	ReasonHTTPStatus Reason = "http_status" // the HTTP status code was not expected
-	ReasonHTTPBody   Reason = "http_body"   // the HTTP response body lacked the expected text
-	ReasonDNSAnswer  Reason = "dns_answer"  // the name resolved without the expected addresses
-	ReasonLatency    Reason = "latency"     // the probe succeeded but took longer than max_latency
-	ReasonOther      Reason = "other"       // anything else, such as a connection reset mid-response
+	ReasonTimeout         Reason = "timeout"          // the check's timeout expired
+	ReasonCanceled        Reason = "canceled"         // the caller cancelled the probe, e.g. at shutdown; says nothing about the target
+	ReasonDNS             Reason = "dns"              // name resolution failed
+	ReasonConnect         Reason = "connect"          // the TCP connection was refused or the host was unreachable
+	ReasonTLS             Reason = "tls"              // the TLS handshake or certificate verification failed
+	ReasonCertExpiry      Reason = "cert_expiry"      // the certificate chain is valid but expires too soon
+	ReasonHTTPStatus      Reason = "http_status"      // the HTTP status code was not expected
+	ReasonHTTPBody        Reason = "http_body"        // the HTTP response body lacked the expected text
+	ReasonDNSAnswer       Reason = "dns_answer"       // the name resolved without the expected addresses
+	ReasonLatency         Reason = "latency"          // the probe succeeded but took longer than max_latency
+	ReasonHeartbeatMissed Reason = "heartbeat_missed" // a heartbeat check's last ping is older than its period and grace
+	ReasonOther           Reason = "other"            // anything else, such as a connection reset mid-response
 )
 
 // Result is the outcome of one probe.
@@ -68,6 +69,9 @@ type Options struct {
 	// Env supplies the variables request templates refer to. Nil uses the
 	// process environment.
 	Env config.Env
+	// Pings tells heartbeat checks when they were last pinged. Nil means
+	// never.
+	Pings Pings
 }
 
 // lookupEnv returns a lookup of variables in the environment, for
@@ -90,6 +94,8 @@ func New(c config.Check, opts Options) Prober {
 	switch {
 	case len(c.Steps) > 0:
 		p = newSteps(c.Steps, opts)
+	case c.Heartbeat != nil:
+		p = newHeartbeat(c, opts)
 	case c.HTTP != nil:
 		p = newHTTP(c.HTTP, opts)
 	case c.TCP != nil:

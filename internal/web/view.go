@@ -51,6 +51,8 @@ type checkInput struct {
 	firingSince time.Time      // zero unless its alert is firing
 	slo         *slo.Status
 	unavailable bool // history could not be read
+	lastPing    time.Time
+	pinged      bool // whether a heartbeat check has been pinged
 }
 
 type pageView struct {
@@ -66,11 +68,14 @@ type checkView struct {
 	Label      string
 	Since      string // for down and recovering checks: when the incident began
 	Checked    string // when the last probe ran
-	Latency    string // the last probe's latency, or "Failed"
-	Note       string // why the last probe failed
-	Spark      sparkline
-	SLO        *sloView
-	Probes     []probeRow // newest first
+	// Heartbeat checks are pinged rather than probed, so they show when
+	// the last ping came instead of a latency.
+	Heartbeat bool
+	Latency   string // the last probe's latency or "Failed"; for a heartbeat, the last ping
+	Note      string // why the last probe failed
+	Spark     sparkline
+	SLO       *sloView
+	Probes    []probeRow // newest first
 }
 
 type sloView struct {
@@ -160,14 +165,28 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 	case statePending, stateUp, stateFailing:
 	}
 	v.Checked = "Checked " + ago(now.Sub(last.Start))
-	if last.OK {
+	switch {
+	case in.check.Heartbeat != nil:
+		v.Heartbeat = true
+		v.Latency = "None yet"
+		if in.pinged {
+			v.Latency = ago(now.Sub(in.lastPing))
+		}
+		if !last.OK {
+			v.Note = "overdue"
+		}
+	case last.OK:
 		v.Latency = latency(last.Duration)
-	} else {
+		v.Spark = buildSparkline(in.samples)
+	default:
 		v.Latency, v.Note = "Failed", strings.ToLower(reasonText(last.Reason)[:1])+reasonText(last.Reason)[1:]
+		v.Spark = buildSparkline(in.samples)
 	}
-	v.Spark = buildSparkline(in.samples)
 	for _, s := range slices.Backward(in.samples) {
-		row := probeRow{Time: clock(s.Start, now), OK: s.OK, Result: "OK", Latency: latency(s.Duration)}
+		row := probeRow{Time: clock(s.Start, now), OK: s.OK, Result: "OK"}
+		if !v.Heartbeat {
+			row.Latency = latency(s.Duration)
+		}
 		if !s.OK {
 			row.Result = reasonText(s.Reason)
 		}
@@ -256,6 +275,8 @@ func reasonText(r probe.Reason) string {
 		return "Unexpected DNS answer"
 	case probe.ReasonLatency:
 		return "Too slow"
+	case probe.ReasonHeartbeatMissed:
+		return "Ping overdue"
 	case probe.ReasonOther:
 		return "Error"
 	}

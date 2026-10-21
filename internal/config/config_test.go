@@ -173,7 +173,7 @@ checks:
     tcp: {address: "a:1"}`, "max_latency 2s must be less than the timeout 2s"},
 		{"no type", `
 checks:
-  - name: a`, "exactly one of http, tcp, dns, tls or steps must be set, found 0"},
+  - name: a`, "exactly one of http, tcp, dns, tls, steps or heartbeat must be set, found 0"},
 		{"two types", `
 checks:
   - name: a
@@ -236,6 +236,19 @@ checks:
 checks:
   - name: a
     tls: {address: "a:443", min_days_remaining: -1}`, "must not be negative"},
+		{"heartbeat without a period", `
+checks:
+  - name: a
+    heartbeat: {grace: 5m}`, "heartbeat.every 0s is below the minimum"},
+		{"negative grace", `
+checks:
+  - name: a
+    heartbeat: {every: 1h, grace: -1m}`, "heartbeat.grace -1m0s must not be negative"},
+		{"heartbeat with max latency", `
+checks:
+  - name: a
+    max_latency: 1s
+    heartbeat: {every: 1h}`, "max_latency does not apply to heartbeat checks"},
 		{"step without a name", `
 checks:
   - name: a
@@ -429,5 +442,26 @@ checks:
 	}
 	if _, err := Parse([]byte(many.String()), noEnv); err == nil || !strings.Contains(err.Error(), "at most 10 are allowed") {
 		t.Errorf("11 steps: error = %v, want a limit of 10", err)
+	}
+}
+
+func TestParseHeartbeatGrace(t *testing.T) {
+	cfg, err := Parse([]byte(`
+checks:
+  - name: hourly
+    heartbeat: {every: 1h}
+  - name: frequent
+    heartbeat: {every: 2m}
+  - name: explicit
+    heartbeat: {every: 1h, grace: 20m}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []time.Duration{6 * time.Minute, time.Minute, 20 * time.Minute} {
+		c := cfg.Checks[i]
+		if c.Type() != "heartbeat" || c.Heartbeat.Grace != want {
+			t.Errorf("%s: type %s, grace %v; want heartbeat, %v", c.Name, c.Type(), c.Heartbeat.Grace, want)
+		}
 	}
 }

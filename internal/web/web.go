@@ -57,6 +57,9 @@ type Source struct {
 	SLOs func() map[string]slo.Status
 	// Firing returns when each firing alert's failures began.
 	Firing func() map[string]time.Time
+	// LastPing returns when a heartbeat check was last pinged. Nil means
+	// never.
+	LastPing func(check string) (time.Time, bool)
 }
 
 type handler struct {
@@ -114,6 +117,7 @@ type apiCheck struct {
 	Type         string    `json:"type"`
 	State        state     `json:"state"`
 	FailingSince time.Time `json:"failing_since,omitzero"`
+	LastPing     time.Time `json:"last_ping,omitzero"` // heartbeat checks only
 	LastProbe    *apiProbe `json:"last_probe,omitempty"`
 	SLO          *apiSLO   `json:"slo,omitempty"`
 }
@@ -140,7 +144,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	v := buildPage(inputs, now)
 	out := apiStatus{Status: v.State, Generated: now.UTC(), Checks: []apiCheck{}}
 	for i, in := range inputs {
-		c := apiCheck{Name: in.check.Name, Type: in.check.Type(), State: v.Checks[i].State, FailingSince: in.firingSince.UTC()}
+		c := apiCheck{Name: in.check.Name, Type: in.check.Type(), State: v.Checks[i].State,
+			FailingSince: in.firingSince.UTC(), LastPing: in.lastPing.UTC()}
 		if n := len(in.samples); n > 0 {
 			last := in.samples[n-1]
 			c.LastProbe = &apiProbe{At: last.Start, OK: last.OK,
@@ -165,6 +170,9 @@ func (h *handler) inputs(ctx context.Context) []checkInput {
 	var inputs []checkInput
 	for _, c := range h.src.Checks() {
 		in := checkInput{check: c, firingSince: firing[c.Name]}
+		if c.Heartbeat != nil && h.src.LastPing != nil {
+			in.lastPing, in.pinged = h.src.LastPing(c.Name)
+		}
 		if s, ok := slos[c.Name]; ok {
 			in.slo = &s
 		}

@@ -35,6 +35,7 @@ type Metrics struct {
 	success       *prometheus.GaugeVec
 	httpPhase     *prometheus.HistogramVec
 	certExpiry    *prometheus.GaugeVec
+	lastPing      *prometheus.GaugeVec
 	checkInfo     *prometheus.GaugeVec
 
 	lag     prometheus.Histogram
@@ -83,6 +84,10 @@ func New() *Metrics {
 		certExpiry: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "tls_cert_expiry_timestamp_seconds",
 			Help: "When the certificate chain seen by the check's last successful handshake stops verifying, as a Unix timestamp.",
+		}, []string{"check"}),
+		lastPing: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "heartbeat_last_ping_timestamp_seconds",
+			Help: "When the heartbeat check was last pinged, as a Unix timestamp.",
 		}, []string{"check"}),
 		checkInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "check_info",
@@ -145,7 +150,7 @@ func New() *Metrics {
 		slos:  make(map[string]bool),
 	}
 	m.registry.MustRegister(
-		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.checkInfo,
+		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.lastPing, m.checkInfo,
 		m.lag, m.skipped, m.reloads, m.lastReloadOK, m.lastReloadTimeOK,
 		m.sloTarget, m.sloAvailability, m.sloBudget,
 		m.alertFiring, m.notificationsSent, m.notificationFailures, m.notificationsPending, m.alertDropped,
@@ -162,7 +167,11 @@ func (m *Metrics) Handler() http.Handler {
 
 // Record updates the metrics for one probe result.
 func (m *Metrics) Record(r scheduler.Result) {
-	m.probeDuration.WithLabelValues(r.Check).Observe(r.Duration.Seconds())
+	// A heartbeat check only looks up its last ping, so its duration says
+	// nothing about any target.
+	if r.Type != "heartbeat" {
+		m.probeDuration.WithLabelValues(r.Check).Observe(r.Duration.Seconds())
+	}
 	result, success := "success", 1.0
 	if !r.OK() {
 		result, success = string(r.Reason), 0
@@ -216,11 +225,16 @@ func (m *Metrics) SetChecks(checks []config.Check) {
 func (m *Metrics) Forget(check string) {
 	labels := prometheus.Labels{"check": check}
 	for _, vec := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
-		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.checkInfo,
+		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.lastPing, m.checkInfo,
 		m.skipped, m.sloTarget, m.sloAvailability, m.sloBudget, m.alertFiring,
 	} {
 		vec.DeletePartialMatch(labels)
 	}
+}
+
+// Pinged records when a heartbeat check was last pinged.
+func (m *Metrics) Pinged(check string, at time.Time) {
+	m.lastPing.WithLabelValues(check).Set(float64(at.Unix()))
 }
 
 // Skipped counts scheduled runs a check skipped.

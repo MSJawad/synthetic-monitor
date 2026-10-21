@@ -21,7 +21,9 @@ import (
 
 	"github.com/MSJawad/synthetic-monitor/internal/alert"
 	"github.com/MSJawad/synthetic-monitor/internal/config"
+	"github.com/MSJawad/synthetic-monitor/internal/heartbeat"
 	"github.com/MSJawad/synthetic-monitor/internal/metrics"
+	"github.com/MSJawad/synthetic-monitor/internal/probe"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
 	"github.com/MSJawad/synthetic-monitor/internal/slo"
 	"github.com/MSJawad/synthetic-monitor/internal/store"
@@ -97,7 +99,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	if err := checkRetention(cfg, o.retention()); err != nil {
+	heartbeatToken := os.Getenv("HEARTBEAT_TOKEN")
+	if err := checkConfig(cfg, o.retention(), heartbeatToken); err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 	notifier, err := newNotifier(os.Getenv("NTFY_URL"), os.Getenv("NTFY_TOKEN"), logger)
@@ -135,7 +138,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		defer debug.Close()
 		logger.Info("debug server listening", "addr", dln.Addr().String())
 	}
-	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, notifier: notifier, reload: reload}
+	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, notifier: notifier, reload: reload,
+		heartbeatToken: heartbeatToken}
 	return svc.serve(ctx, ln, cfg)
 }
 
@@ -154,14 +158,20 @@ func newNotifier(topicURL, token string, logger *slog.Logger) (alert.Notifier, e
 	return n, nil
 }
 
-// checkRetention rejects SLO windows longer than the history kept, which
-// would silently compute SLOs over less data than they claim.
-func checkRetention(cfg *config.Config, retention time.Duration) error {
+// checkConfig rejects configs that are valid on their own but not with how
+// the monitor runs:
+//   - an SLO window longer than the history kept, which would silently
+//     compute SLOs over less data than they claim;
+//   - a heartbeat check without HEARTBEAT_TOKEN, which nothing could ping.
+func checkConfig(cfg *config.Config, retention time.Duration, heartbeatToken string) error {
 	var errs []error
 	for _, c := range cfg.Checks {
 		if c.SLO != nil && c.SLO.Window() > retention {
 			errs = append(errs, fmt.Errorf("check %q: slo.window_days %d exceeds the %d days of history kept (-history-retention-days)",
 				c.Name, c.SLO.WindowDays, int(retention.Hours()/24)))
+		}
+		if c.Heartbeat != nil && heartbeatToken == "" {
+			errs = append(errs, fmt.Errorf("check %q: heartbeat checks need HEARTBEAT_TOKEN set, or nothing can ping them", c.Name))
 		}
 	}
 	return errors.Join(errs...)
@@ -175,6 +185,8 @@ type service struct {
 	history  *store.Store
 	notifier alert.Notifier
 	reload   <-chan os.Signal
+	// heartbeatToken authenticates pings; empty disables the endpoint.
+	heartbeatToken string
 }
 
 // serve runs the monitor with cfg until ctx is cancelled, then shuts down in
@@ -193,13 +205,21 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	if err != nil {
 		return err
 	}
+	pings, err := heartbeat.New(ctx, s.history, m.Pinged)
+	if err != nil {
+		return fmt.Errorf("loading heartbeats: %w", err)
+	}
 	sched := scheduler.New(sinks{m, s.history, alerts, logSink{logger}}, scheduler.Options{
 		MaxConcurrent: s.opts.maxConcurrent,
 		Logger:        logger,
+		NewProber:     func(c config.Check) probe.Prober { return probe.New(c, probe.Options{Pings: pings}) },
 		OnSkip:        m.Skipped,
 		OnRemoved: func(check string) {
 			m.Forget(check)
 			alerts.Forget(check)
+			if err := pings.Forget(context.WithoutCancel(ctx), check); err != nil {
+				logger.Error("forgetting a removed check's heartbeats", "check", check, "err", err)
+			}
 		},
 	})
 	m.TrackInFlight(sched.InFlight)
@@ -218,16 +238,28 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	var slos atomic.Pointer[map[string]slo.Status]
 	slos.Store(&map[string]slo.Status{})
 	status := web.Handler(web.Source{
-		Checks: func() []config.Check { return current.Load().Checks },
-		Recent: s.history.Recent,
-		SLOs:   func() map[string]slo.Status { return *slos.Load() },
-		Firing: alerts.Firing,
+		Checks:   func() []config.Check { return current.Load().Checks },
+		Recent:   s.history.Recent,
+		SLOs:     func() map[string]slo.Status { return *slos.Load() },
+		Firing:   alerts.Firing,
+		LastPing: pings.LastPing,
 	}, logger)
+	var heartbeats http.Handler
+	if s.heartbeatToken != "" {
+		heartbeats = heartbeat.Handler(pings, s.heartbeatToken, func(name string) bool {
+			for _, c := range current.Load().Checks {
+				if c.Name == name {
+					return c.Heartbeat != nil
+				}
+			}
+			return false
+		}, logger)
+	}
 
 	var ready atomic.Bool
 	ready.Store(true)
 	srv := &http.Server{
-		Handler:           newMux(&ready, m.Handler(), status),
+		Handler:           newMux(&ready, m.Handler(), status, heartbeats),
 		ReadHeaderTimeout: 5 * time.Second, // bounds clients that send headers slowly to hold connections open
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -245,7 +277,7 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 		}
 		s.watcher.Run(bgCtx, s.opts.pollInterval, s.reload,
 			func(cfg *config.Config) {
-				if err := checkRetention(cfg, s.opts.retention()); err != nil {
+				if err := checkConfig(cfg, s.opts.retention(), s.heartbeatToken); err != nil {
 					reject(err)
 					return
 				}
@@ -299,10 +331,15 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	return err
 }
 
-func newMux(ready *atomic.Bool, metrics, status http.Handler) *http.ServeMux {
+// newMux routes the server's endpoints. heartbeats is nil when pings are
+// disabled.
+func newMux(ready *atomic.Bool, metrics, status, heartbeats http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", status)
 	mux.Handle("GET /metrics", metrics)
+	if heartbeats != nil {
+		mux.Handle("POST /heartbeat/{check}", heartbeats)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "ok\n")
