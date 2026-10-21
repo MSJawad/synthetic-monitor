@@ -32,6 +32,7 @@ func TestCompute(t *testing.T) {
 		{"no failures", 0.995, 1000, 0, 1, 1},
 		{"part of the budget used", 0.995, 1000, 2, 0.998, 0.6},
 		{"budget exactly used", 0.995, 1000, 5, 0.995, 0},
+		{"budget exactly used, three nines", 0.999, 3000, 3, 0.999, 0},
 		{"budget overspent", 0.995, 1000, 10, 0.99, -1},
 		{"everything failed", 0.9, 10, 10, 0, -9},
 		{"one probe, failed", 0.999, 1, 1, 0, -999},
@@ -49,6 +50,9 @@ func TestCompute(t *testing.T) {
 		})
 	}
 
+	if s, _ := Compute(0.995, month, 1000, 5); s.BudgetRemaining > 0 {
+		t.Errorf("budget remaining with 5 of 5 allowed failures = %v, want exactly 0 or less", s.BudgetRemaining)
+	}
 	if _, ok := Compute(0.995, month, 0, 0); ok {
 		t.Error("Compute with no probes reported a status")
 	}

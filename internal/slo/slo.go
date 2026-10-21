@@ -37,7 +37,10 @@ func Compute(target float64, window time.Duration, total, failed int) (Status, b
 	if total == 0 {
 		return Status{}, false
 	}
-	allowed := (1 - target) * float64(total)
+	// total - target*total rather than (1-target)*total: 1 - 0.995 is
+	// 0.0050000000000000044 in floating point, which would allow a sliver
+	// more than 5 failures in 1000 and leave a used-up budget at "0% left".
+	allowed := float64(total) - target*float64(total)
 	return Status{
 		Target:          target,
 		Window:          window,
