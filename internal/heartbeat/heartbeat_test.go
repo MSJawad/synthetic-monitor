@@ -68,6 +68,26 @@ func TestRegistryLoadsSavedPings(t *testing.T) {
 	}
 }
 
+// emptyStore has never saved a ping and returns a nil map, as a Store may.
+type emptyStore struct{}
+
+func (emptyStore) Heartbeats(context.Context) (map[string]time.Time, error) { return nil, nil }
+func (emptyStore) SaveHeartbeat(context.Context, string, time.Time) error   { return nil }
+func (emptyStore) DeleteHeartbeat(context.Context, string) error            { return nil }
+
+func TestRegistryFromEmptyStore(t *testing.T) {
+	r, err := New(t.Context(), emptyStore{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Ping(t.Context(), "cron", earlier); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := r.LastPing("cron"); !ok || !at.Equal(earlier) {
+		t.Errorf("LastPing = %v, %v; want the ping", at, ok)
+	}
+}
+
 func TestHandler(t *testing.T) {
 	store := &memStore{pings: map[string]time.Time{}}
 	r, err := New(t.Context(), store, nil)

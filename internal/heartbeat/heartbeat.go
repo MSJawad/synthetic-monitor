@@ -34,6 +34,9 @@ func New(ctx context.Context, store Store, onPing func(check string, at time.Tim
 	if err != nil {
 		return nil, err
 	}
+	if last == nil {
+		last = make(map[string]time.Time)
+	}
 	if onPing == nil {
 		onPing = func(string, time.Time) {}
 	}
