@@ -3,13 +3,14 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"time"
@@ -28,6 +29,9 @@ const (
 // Config is the parsed and validated contents of a checks file.
 type Config struct {
 	Checks []Check `yaml:"checks"`
+	// Version identifies the file contents the config was parsed from, so
+	// logs can show which version is in effect.
+	Version string `yaml:"-"`
 }
 
 // Check is one endpoint probed on a schedule. Exactly one of HTTP, TCP, DNS
@@ -97,15 +101,6 @@ func (c Check) Type() string {
 	return ""
 }
 
-// Load reads and parses the config file at path.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // the path is chosen by the operator, not by untrusted input
-	if err != nil {
-		return nil, err
-	}
-	return Parse(data)
-}
-
 // Parse decodes a config, applies defaults and validates it. Unknown fields
 // are errors, so a misspelt option fails loudly instead of being ignored.
 // All validation problems are reported together.
@@ -125,6 +120,8 @@ func Parse(data []byte) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	sum := sha256.Sum256(data)
+	cfg.Version = hex.EncodeToString(sum[:6])
 	return &cfg, nil
 }
 

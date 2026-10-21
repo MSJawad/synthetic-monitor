@@ -2,8 +2,6 @@ package config
 
 import (
 	"net/netip"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -230,23 +228,5 @@ checks:
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
-	}
-}
-
-func TestLoad(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "checks.yaml")
-	if err := os.WriteFile(path, []byte("checks:\n  - name: a\n    tcp: {address: \"a:1\"}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Checks) != 1 || cfg.Checks[0].Type() != "tcp" {
-		t.Fatalf("checks = %+v, want one tcp check", cfg.Checks)
-	}
-
-	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
-		t.Fatal("Load of a missing file succeeded")
 	}
 }
