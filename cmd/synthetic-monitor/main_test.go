@@ -217,6 +217,9 @@ func TestMonitor(t *testing.T) {
 	if shutdown < 0 || count(entries[shutdown:], "probe succeeded", "web") != 1 {
 		t.Errorf("the probe in flight at shutdown was not recorded after shutdown began")
 	}
+	if i := index(entries, "waiting for probes in flight"); i < 0 || entries[i].Probes != 1 {
+		t.Errorf("shutdown did not log that it was waiting for the 1 probe in flight")
+	}
 	if index(entries, "shutdown deadline reached") >= 0 {
 		t.Errorf("shutdown aborted probes, want them to finish")
 	}
@@ -302,8 +305,9 @@ type logBuffer struct {
 }
 
 type logEntry struct {
-	Msg   string `json:"msg"`
-	Check string `json:"check"`
+	Msg    string `json:"msg"`
+	Check  string `json:"check"`
+	Probes int    `json:"probes"`
 }
 
 func (b *logBuffer) Write(p []byte) (int, error) {

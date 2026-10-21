@@ -275,6 +275,7 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	// WithoutCancel keeps ctx's values but drops its cancellation.
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.opts.shutdownTimeout)
 	defer cancel()
+	logger.Info("waiting for probes in flight", "probes", sched.InFlight(), "timeout", s.opts.shutdownTimeout.String())
 	if stopErr := sched.Stop(shutdownCtx); stopErr != nil {
 		logger.Warn("shutdown deadline reached", "err", stopErr)
 	}
