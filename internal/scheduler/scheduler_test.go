@@ -42,6 +42,11 @@ func TestFirstProbeWithinIntervalThenFixedCadence(t *testing.T) {
 				t.Errorf("probes %d and %d are %v apart, want exactly 10s", i-1, i, gap)
 			}
 		}
+		for _, lag := range h.lagsOf("a") {
+			if lag != 0 {
+				t.Errorf("probe started %v after it was scheduled, want on time without contention", lag)
+			}
+		}
 		h.stop()
 	})
 }
@@ -100,6 +105,15 @@ func TestOverrunningProbeSkipsMissedSlots(t *testing.T) {
 				t.Errorf("probes %d and %d are %v apart, want 30s: the next free 10s slot", i-1, i, gap)
 			}
 		}
+		skips := h.skipsOf("a")
+		if done := h.recorded("a"); len(skips) != done {
+			t.Errorf("OnSkip called %d times for %d completed probes, all of which overran", len(skips), done)
+		}
+		for _, n := range skips {
+			if n != 2 {
+				t.Errorf("OnSkip reported %d skipped runs, want 2 (a 25s probe overruns two 10s slots)", n)
+			}
+		}
 		if got := h.maxInFlight("a"); got != 1 {
 			t.Errorf("check a had %d probes in flight at once, want 1", got)
 		}
@@ -121,6 +135,15 @@ func TestConcurrencyLimit(t *testing.T) {
 
 		if got := h.maxInFlightTotal(); got != 3 {
 			t.Errorf("at most %d probes were in flight at once, want the limit of 3", got)
+		}
+		var waited bool
+		for _, c := range checks {
+			for _, lag := range h.lagsOf(c.Name) {
+				waited = waited || lag > 0
+			}
+		}
+		if !waited {
+			t.Error("no probe started late, want waits for a free slot to show as lag")
 		}
 		h.stop()
 	})
@@ -209,6 +232,78 @@ func TestApplyRemovedCheckFinishesProbeInFlight(t *testing.T) {
 		}
 		if n := h.recorded("a"); n != 1 {
 			t.Errorf("%d results recorded, want the in-flight probe's", n)
+		}
+		h.stop()
+	})
+}
+
+func TestReaddedCheckWaitsForItsProbeStillInFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 10)
+		release := h.hold("a")
+		h.sched.Apply([]config.Check{check("a", 10*time.Second)})
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		h.sched.Apply(nil) // removed, but its probe is still in flight
+		h.unhold("a")
+		h.sched.Apply([]config.Check{check("a", 10*time.Second)})
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if n := len(h.startsOf("a")); n != 1 {
+			t.Fatalf("the re-added check started %d probes while its old one was in flight, want it to wait", n-1)
+		}
+
+		close(release)
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		if n := len(h.startsOf("a")); n < 2 {
+			t.Errorf("the re-added check did not run after the old probe finished")
+		}
+		if got := h.maxInFlight("a"); got != 1 {
+			t.Errorf("check a had %d probes in flight at once, want 1", got)
+		}
+		h.stop()
+	})
+}
+
+func TestOnRemovedFiresOnceRemovedCheckHasStopped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 10)
+		release := h.hold("a")
+		h.sched.Apply([]config.Check{check("a", 10*time.Second), check("b", 10*time.Second)})
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		h.sched.Apply([]config.Check{check("b", 20*time.Second)}) // remove a, change b
+		synctest.Wait()
+		if got := h.removals(); len(got) != 0 {
+			t.Fatalf("OnRemoved(%v) while a's probe was still in flight", got)
+		}
+		close(release)
+		synctest.Wait()
+		if got := h.removals(); len(got) != 1 || got[0] != "a" {
+			t.Fatalf("OnRemoved calls = %v, want [a]: once for the removed check, never for the changed one", got)
+		}
+		h.stop()
+	})
+}
+
+func TestOnRemovedSkipsCheckReaddedWhileStopping(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 10)
+		release := h.hold("a")
+		h.sched.Apply([]config.Check{check("a", 10*time.Second)})
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		h.sched.Apply(nil)
+		h.sched.Apply([]config.Check{check("a", 10*time.Second)})
+		close(release)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if got := h.removals(); len(got) != 0 {
+			t.Fatalf("OnRemoved(%v) for a check that was re-added", got)
 		}
 		h.stop()
 	})
@@ -317,6 +412,9 @@ type harness struct {
 	mu            sync.Mutex
 	probes        map[string][]probeRun
 	results       map[string]int
+	lags          map[string][]time.Duration // Start minus Scheduled of each result
+	skips         map[string][]int
+	removed       []string
 	inFlight      map[string]int
 	maxPerCheck   map[string]int
 	total, maxAll int
@@ -334,10 +432,24 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	h := &harness{
 		t: t, epoch: time.Now(),
 		probes: make(map[string][]probeRun), results: make(map[string]int),
+		lags: make(map[string][]time.Duration), skips: make(map[string][]int),
 		inFlight: make(map[string]int), maxPerCheck: make(map[string]int),
 		durations: make(map[string]time.Duration), holds: make(map[string]chan struct{}),
 	}
-	h.sched = New(h, Options{MaxConcurrent: maxConcurrent, NewProber: h.newProber})
+	h.sched = New(h, Options{
+		MaxConcurrent: maxConcurrent,
+		NewProber:     h.newProber,
+		OnSkip: func(check string, runs int) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.skips[check] = append(h.skips[check], runs)
+		},
+		OnRemoved: func(check string) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.removed = append(h.removed, check)
+		},
+	})
 	return h
 }
 
@@ -349,6 +461,25 @@ func (h *harness) Record(r Result) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.results[r.Check]++
+	h.lags[r.Check] = append(h.lags[r.Check], r.Start.Sub(r.Scheduled))
+}
+
+func (h *harness) lagsOf(check string) []time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]time.Duration(nil), h.lags[check]...)
+}
+
+func (h *harness) skipsOf(check string) []int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]int(nil), h.skips[check]...)
+}
+
+func (h *harness) removals() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.removed...)
 }
 
 func (h *harness) newProber(c config.Check) probe.Prober {
