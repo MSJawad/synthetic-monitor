@@ -27,6 +27,7 @@ import (
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
 	"github.com/MSJawad/synthetic-monitor/internal/slo"
 	"github.com/MSJawad/synthetic-monitor/internal/store"
+	"github.com/MSJawad/synthetic-monitor/internal/watchdog"
 	"github.com/MSJawad/synthetic-monitor/internal/web"
 )
 
@@ -47,6 +48,7 @@ type options struct {
 	maxConcurrent   int
 	pollInterval    time.Duration
 	shutdownTimeout time.Duration
+	watchdogEvery   time.Duration
 	logLevel        slog.Level
 	sloInterval     time.Duration // not a flag: tests shorten it
 	flushTimeout    time.Duration // not a flag
@@ -69,6 +71,7 @@ func parseFlags(args []string) (options, error) {
 	flags.DurationVar(&o.pollInterval, "config-poll-interval", 5*time.Second, "how often to check the checks file for changes")
 	flags.DurationVar(&o.shutdownTimeout, "shutdown-timeout", 30*time.Second,
 		"how long probes in flight get to finish after SIGTERM before they are aborted")
+	flags.DurationVar(&o.watchdogEvery, "watchdog-interval", time.Minute, "how often to request WATCHDOG_URL, if it is set")
 	flags.TextVar(&o.logLevel, "log-level", slog.LevelInfo, "minimum log level: debug, info, warn or error")
 	if err := flags.Parse(args); err != nil {
 		return o, err
@@ -80,8 +83,8 @@ func parseFlags(args []string) (options, error) {
 		return o, errors.New("-max-concurrent-probes must be at least 1")
 	case o.retentionDays < 1:
 		return o, errors.New("-history-retention-days must be at least 1")
-	case o.pollInterval <= 0 || o.shutdownTimeout <= 0:
-		return o, errors.New("-config-poll-interval and -shutdown-timeout must be positive")
+	case o.pollInterval <= 0 || o.shutdownTimeout <= 0 || o.watchdogEvery <= 0:
+		return o, errors.New("-config-poll-interval, -shutdown-timeout and -watchdog-interval must be positive")
 	}
 	return o, nil
 }
@@ -106,6 +109,12 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	notifier, err := newNotifier(os.Getenv("NTFY_URL"), os.Getenv("NTFY_TOKEN"), logger)
 	if err != nil {
 		return err
+	}
+	watchdogURL := os.Getenv("WATCHDOG_URL")
+	if watchdogURL == "" {
+		logger.Warn("WATCHDOG_URL is not set, so nothing outside will notice if the monitor stops")
+	} else if err := watchdog.Validate(watchdogURL); err != nil {
+		return fmt.Errorf("WATCHDOG_URL: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -139,7 +148,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		logger.Info("debug server listening", "addr", dln.Addr().String())
 	}
 	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, notifier: notifier, reload: reload,
-		heartbeatToken: heartbeatToken}
+		heartbeatToken: heartbeatToken, watchdogURL: watchdogURL}
 	return svc.serve(ctx, ln, cfg)
 }
 
@@ -187,6 +196,9 @@ type service struct {
 	reload   <-chan os.Signal
 	// heartbeatToken authenticates pings; empty disables the endpoint.
 	heartbeatToken string
+	// watchdogURL is requested regularly while the monitor runs; empty
+	// disables it.
+	watchdogURL string
 }
 
 // serve runs the monitor with cfg until ctx is cancelled, then shuts down in
@@ -285,6 +297,14 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 				apply(cfg)
 			}, reject)
 	})
+	if s.watchdogURL != "" {
+		// Pinging stops as soon as shutdown starts: from then on the
+		// monitor is no longer watching anything.
+		background.Go(func() {
+			watchdog.Run(bgCtx, watchdog.Options{URL: s.watchdogURL, Interval: s.opts.watchdogEvery,
+				Client: &http.Client{}, Logger: logger, OnPing: m.WatchdogPinged})
+		})
+	}
 	background.Go(func() {
 		slo.Run(bgCtx, s.opts.sloInterval, s.history,
 			func() []config.Check { return current.Load().Checks },

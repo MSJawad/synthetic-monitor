@@ -35,7 +35,7 @@ func TestParseFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := options{configPath: "checks.yaml", listen: ":8080", historyPath: "history.db", retentionDays: 35,
-		maxConcurrent: 64, pollInterval: 5 * time.Second, shutdownTimeout: 30 * time.Second,
+		maxConcurrent: 64, pollInterval: 5 * time.Second, shutdownTimeout: 30 * time.Second, watchdogEvery: time.Minute,
 		logLevel: slog.LevelDebug, sloInterval: 30 * time.Second, flushTimeout: 5 * time.Second}
 	if o != want {
 		t.Errorf("options = %+v, want %+v", o, want)
@@ -46,6 +46,7 @@ func TestParseFlags(t *testing.T) {
 		{"-config", "c.yaml", "-max-concurrent-probes", "0"},
 		{"-config", "c.yaml", "-history-retention-days", "0"},
 		{"-config", "c.yaml", "-shutdown-timeout", "0s"},
+		{"-config", "c.yaml", "-watchdog-interval", "0s"},
 		{"-config", "c.yaml", "-log-level", "loud"},
 	} {
 		if _, err := parseFlags(args); err == nil {
@@ -331,6 +332,62 @@ func TestShutdownDeadline(t *testing.T) {
 	}
 }
 
+// testMonitor is the service running against a checks file, for tests
+// that drive it from outside.
+type testMonitor struct {
+	base   string
+	logs   *logBuffer
+	cancel context.CancelFunc
+	done   chan error
+}
+
+// startTestMonitor runs the service with the checks file at path and
+// history at historyPath. configure, if not nil, adjusts the service
+// before it starts.
+func startTestMonitor(t *testing.T, path, historyPath string, configure func(*service)) *testMonitor {
+	t.Helper()
+	watcher, cfg, err := config.NewWatcher(path, os.LookupEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := store.Open(t.Context(), historyPath, store.Options{Retention: 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &logBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &service{logger: logger, watcher: watcher, history: history,
+		notifier: alert.LogNotifier{Logger: logger}, reload: make(chan os.Signal),
+		opts: options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 5 * time.Second,
+			flushTimeout: 5 * time.Second, retentionDays: 1, sloInterval: time.Minute, watchdogEvery: time.Minute}}
+	if configure != nil {
+		configure(svc)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	m := &testMonitor{base: "http://" + ln.Addr().String(), logs: logs, cancel: cancel, done: make(chan error, 1)}
+	go func() { m.done <- svc.serve(ctx, ln, cfg) }()
+	waitForStatus(t, m.base+"/readyz", http.StatusOK)
+	return m
+}
+
+func (m *testMonitor) stop(t *testing.T) {
+	t.Helper()
+	m.cancel()
+	select {
+	case err := <-m.done:
+		if err != nil {
+			t.Fatalf("monitor = %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("monitor did not stop")
+	}
+}
+
 // TestHeartbeats pings a heartbeat check over HTTP, lets it go overdue, and
 // restarts the monitor to show the last ping is remembered.
 func TestHeartbeats(t *testing.T) {
@@ -340,46 +397,9 @@ func TestHeartbeats(t *testing.T) {
 	writeFile(t, path, "checks:\n  - name: cron\n    interval: 1s\n    failure_threshold: 1\n"+
 		"    heartbeat: {every: 2s, grace: 500ms}\n")
 	historyPath := filepath.Join(dir, "history.db")
+	withToken := func(s *service) { s.heartbeatToken = "s3cr3t" }
 
-	type running struct {
-		base   string
-		logs   *logBuffer
-		cancel context.CancelFunc
-		done   chan error
-	}
-	start := func() *running {
-		watcher, cfg, err := config.NewWatcher(path, os.LookupEnv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		history, err := store.Open(t.Context(), historyPath, store.Options{Retention: 24 * time.Hour})
-		if err != nil {
-			t.Fatal(err)
-		}
-		logs := &logBuffer{}
-		logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-		var lc net.ListenConfig
-		ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 5 * time.Second,
-			flushTimeout: 5 * time.Second, retentionDays: 1, sloInterval: time.Minute}
-		svc := &service{opts: o, logger: logger, watcher: watcher, history: history,
-			notifier: alert.LogNotifier{Logger: logger}, reload: make(chan os.Signal), heartbeatToken: "s3cr3t"}
-		ctx, cancel := context.WithCancel(t.Context())
-		m := &running{base: "http://" + ln.Addr().String(), logs: logs, cancel: cancel, done: make(chan error, 1)}
-		go func() { m.done <- svc.serve(ctx, ln, cfg) }()
-		waitForStatus(t, m.base+"/readyz", http.StatusOK)
-		return m
-	}
-	stop := func(m *running) {
-		m.cancel()
-		if err := <-m.done; err != nil {
-			t.Fatalf("monitor = %v", err)
-		}
-	}
-	ping := func(m *running, token string) int {
+	ping := func(m *testMonitor, token string) int {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, m.base+"/heartbeat/cron", nil)
 		if err != nil {
 			t.Fatal(err)
@@ -392,7 +412,7 @@ func TestHeartbeats(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
-	lastPing := func(m *running) string {
+	lastPing := func(m *testMonitor) string {
 		_, body, err := get(t.Context(), m.base+"/api/status")
 		if err != nil {
 			t.Fatal(err)
@@ -408,7 +428,7 @@ func TestHeartbeats(t *testing.T) {
 		return status.Checks[0].LastPing
 	}
 
-	m := start()
+	m := startTestMonitor(t, path, historyPath, withToken)
 	if code := ping(m, "guess"); code != http.StatusUnauthorized {
 		t.Errorf("ping with the wrong token: status %d, want 401", code)
 	}
@@ -433,13 +453,39 @@ func TestHeartbeats(t *testing.T) {
 		}
 		return false
 	})
-	stop(m)
+	m.stop(t)
 
 	// A restart remembers the last ping rather than starting the clock again.
-	m = start()
-	defer stop(m)
+	m = startTestMonitor(t, path, historyPath, withToken)
+	defer m.stop(t)
 	if got := lastPing(m); got != pinged {
 		t.Errorf("after a restart, last_ping = %q, want %q", got, pinged)
+	}
+}
+
+// TestWatchdog checks that the running monitor pings WATCHDOG_URL, and stops
+// once shutdown begins.
+func TestWatchdog(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int32
+	outside := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	defer outside.Close()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "checks.yaml")
+	writeFile(t, path, "checks: []\n")
+
+	m := startTestMonitor(t, path, filepath.Join(dir, "history.db"), func(s *service) {
+		s.watchdogURL = outside.URL + "/ping/abc"
+		s.opts.watchdogEvery = 50 * time.Millisecond
+	})
+	waitForMetrics(t, m.base, "three watchdog pings", func(s string) bool {
+		return hits.Load() >= 3 && strings.Contains(s, `synthetic_watchdog_pings_total{result="success"}`)
+	})
+	m.stop(t)
+	after := hits.Load()
+	time.Sleep(200 * time.Millisecond)
+	if n := hits.Load(); n != after {
+		t.Errorf("%d watchdog pings after shutdown, want none", n-after)
 	}
 }
 

@@ -43,6 +43,7 @@ go run ./cmd/synthetic-monitor -config examples/checks.yaml -log-level debug
 | `-shutdown-timeout` | `30s` | how long probes in flight get to finish after SIGTERM |
 | `-log-level` | `info` | `debug` also logs every successful probe |
 | `-debug-listen` | (off) | address for `/debug/pprof/`, e.g. `127.0.0.1:6060`; never expose it publicly |
+| `-watchdog-interval` | `1m` | how often to request `WATCHDOG_URL` |
 
 Alerts go to [ntfy](https://ntfy.sh), configured through the environment so the
 topic can live in a secret:
@@ -52,6 +53,7 @@ topic can live in a secret:
 | `NTFY_URL` | topic to publish to, e.g. `https://ntfy.sh/<long-random-topic>`; without it, notifications are only logged |
 | `NTFY_TOKEN` | optional bearer token, for protected topics or self-hosted servers |
 | `HEARTBEAT_TOKEN` | token jobs send to ping heartbeat checks; required if there are any |
+| `WATCHDOG_URL` | URL at an outside service, such as a [healthchecks.io](https://healthchecks.io) ping URL, requested every minute while the monitor runs, so that service alerts when the monitor goes silent |
 
 Edits to the checks file are applied within one poll interval, or at once on
 `SIGHUP`. An invalid file is rejected and logged, and the previous checks keep
@@ -98,6 +100,7 @@ Per-check series are labelled only with `check`; join on
 | `synthetic_notification_delivery_failures_total{kind,permanent}` | counter | failed deliveries; `permanent="true"` ones were given up on |
 | `synthetic_notifications_pending` | gauge | notifications saved but not yet delivered |
 | `synthetic_alert_dropped_results_total` | counter | results not evaluated for alerting because its queue was full |
+| `synthetic_watchdog_pings_total{result}` | counter | requests to `WATCHDOG_URL`: `success` or `failure` |
 
 Failure reasons: `timeout`, `dns`, `connect`, `tls`, `cert_expiry`,
 `http_status`, `http_body`, `dns_answer`, `latency`, `heartbeat_missed`,
@@ -677,3 +680,17 @@ fails rather than staying grey forever.
 - **One bearer token for all pings, checked before the name,** so a caller
   without it cannot discover which checks exist. A token in the URL, the
   common alternative, would end up in access logs.
+
+### A dead man's switch for the monitor itself
+
+A monitor cannot report its own death: if its node, its cluster or its
+network fails, every alert it would have sent fails with it. So the monitor
+requests `WATCHDOG_URL` every minute, and an outside service such as
+healthchecks.io alerts when those requests stop. It is the same idea as
+heartbeat checks, pointed the other way.
+
+The requests stop as soon as shutdown begins, so a deploy shows up as a
+short gap; the outside service's grace period should cover one (a few
+minutes). The URL usually identifies the account, so it is treated as a
+secret: Go's HTTP errors quote the URL, and the watchdog logs only the
+underlying cause.

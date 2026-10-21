@@ -55,6 +55,8 @@ type Metrics struct {
 	notificationsPending prometheus.Gauge
 	alertDropped         prometheus.Counter
 
+	watchdogPings *prometheus.CounterVec
+
 	mu    sync.Mutex
 	types map[string]string // check name to type, as last set on checkInfo
 	slos  map[string]bool   // checks with SLO status series
@@ -146,6 +148,10 @@ func New() *Metrics {
 			Namespace: namespace, Name: "alert_dropped_results_total",
 			Help: "Probe results not evaluated for alerting because the queue was full.",
 		}),
+		watchdogPings: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "watchdog_pings_total",
+			Help: "Requests to WATCHDOG_URL, by result: success or failure.",
+		}, []string{"result"}),
 		types: make(map[string]string),
 		slos:  make(map[string]bool),
 	}
@@ -154,6 +160,7 @@ func New() *Metrics {
 		m.lag, m.skipped, m.reloads, m.lastReloadOK, m.lastReloadTimeOK,
 		m.sloTarget, m.sloAvailability, m.sloBudget,
 		m.alertFiring, m.notificationsSent, m.notificationFailures, m.notificationsPending, m.alertDropped,
+		m.watchdogPings,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -235,6 +242,15 @@ func (m *Metrics) Forget(check string) {
 // Pinged records when a heartbeat check was last pinged.
 func (m *Metrics) Pinged(check string, at time.Time) {
 	m.lastPing.WithLabelValues(check).Set(float64(at.Unix()))
+}
+
+// WatchdogPinged counts a request to the watchdog URL.
+func (m *Metrics) WatchdogPinged(ok bool) {
+	result := "success"
+	if !ok {
+		result = "failure"
+	}
+	m.watchdogPings.WithLabelValues(result).Inc()
 }
 
 // Skipped counts scheduled runs a check skipped.

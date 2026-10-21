@@ -132,6 +132,17 @@ synthetic_check_info{check="a",type="http"} 1
 	}
 }
 
+func TestWatchdogPinged(t *testing.T) {
+	m := New()
+	m.WatchdogPinged(true)
+	m.WatchdogPinged(true)
+	m.WatchdogPinged(false)
+	if ok, failed := testutil.ToFloat64(m.watchdogPings.WithLabelValues("success")),
+		testutil.ToFloat64(m.watchdogPings.WithLabelValues("failure")); ok != 2 || failed != 1 {
+		t.Errorf("watchdog pings: %v succeeded, %v failed; want 2 and 1", ok, failed)
+	}
+}
+
 func TestHeartbeatChecks(t *testing.T) {
 	m := New()
 	r := result("cron", "")
