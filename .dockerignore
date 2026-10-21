@@ -1,0 +1,7 @@
+# Only what the build needs, so local databases, binaries and .git never
+# reach the build context.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
