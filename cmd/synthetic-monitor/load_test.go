@@ -36,18 +36,28 @@ var (
 	loadProfile = flag.String("load-profile", "", "directory to write a CPU profile of each TestLoad level to")
 )
 
-// Load test timing: each level runs warmup, then is measured for window.
-const (
-	loadWarmup = 3 * time.Second
-	loadWindow = 10 * time.Second
-)
+// loadWindow is how long each level is measured, after loadWarmup.
+const loadWindow = 10 * time.Second
+
+// loadWarmup is how long each level runs before it is measured. Connections
+// the monitor closes first stay in TIME_WAIT for 2×MSL (30s on macOS, 60s
+// on Linux), so port usage, and its cost in connect(), only levels off
+// after that long; measuring sooner would report a fresh machine rather
+// than a steady state.
+func loadWarmup() time.Duration {
+	if runtime.GOOS == "darwin" {
+		return 35 * time.Second
+	}
+	return 65 * time.Second
+}
 
 // TestLoad measures how many checks one instance sustains. It wires the
 // service's pipeline (scheduler, real probes, metrics, SQLite history and
 // alerting) and runs N checks, each probing every second against a server
 // in the same process, stepping N up. A level is sustained if at least 99%
 // of the scheduled probes ran, none failed, and p99 scheduler lag stayed
-// under 100ms. CPU figures include the target server's share.
+// under 100ms. CPU figures include the target server's share. All probes
+// go to one destination, the worst case for local port usage.
 //
 //	go test -run TestLoad -v -timeout 30m ./cmd/synthetic-monitor -args -load
 func TestLoad(t *testing.T) {
@@ -59,21 +69,14 @@ func TestLoad(t *testing.T) {
 		kind   string
 		checks []int
 	}{
-		{"http", []int{1000, 2000, 4000, 8000, 12000, 16000}},
-		{"https", []int{500, 1000, 2000, 3000, 4000}},
+		{"http", []int{1000, 2000, 4000, 8000, 12000, 16000, 20000, 24000}},
+		{"https", []int{500, 1000, 2000, 3000, 4000, 5000, 6000}},
 	}
 	t.Logf("%s/%s, %d CPUs, Go %s", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())
 	t.Log("| probe | checks | probes/s | ran | failed | skipped | lag p50 | lag p99 | CPU cores | CPU per probe | heap | sustained |")
 	t.Log("|---|---|---|---|---|---|---|---|---|---|---|---|")
-	first := true
 	for _, l := range levels {
 		for _, n := range l.checks {
-			if !first && runtime.GOOS == "darwin" {
-				// macOS shares its ephemeral ports across the machine, and the
-				// last level left some in TIME_WAIT for 30s.
-				time.Sleep(35 * time.Second)
-			}
-			first = false
 			r := runLoad(t, l.kind, n, cert, pool)
 			t.Log(r.row())
 		}
@@ -146,7 +149,7 @@ func runLoad(t *testing.T, kind string, n int, cert tls.Certificate, pool *x509.
 	})
 	sched.Apply(checks)
 
-	time.Sleep(loadWarmup)
+	time.Sleep(loadWarmup())
 	var profile *os.File
 	if *loadProfile != "" {
 		if profile, err = os.Create(filepath.Join(*loadProfile, fmt.Sprintf("cpu-%s-%d.pprof", kind, n))); err != nil {

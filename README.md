@@ -97,6 +97,44 @@ Per-check series are labelled only with `check`; join on
 Failure reasons: `timeout`, `dns`, `connect`, `tls`, `cert_expiry`,
 `http_status`, `http_body`, `dns_answer`, `latency`, `other`.
 
+## Performance
+
+Measured on an Apple M1 (8 cores), on macOS and on Linux arm64 (the
+production platform) in a VM on the same machine. Every check probes every
+second against one local server; "sustained" means at least 99% of probes ran
+on time with no failures. Full tables, method and profiles:
+[docs/performance.md](docs/performance.md).
+
+| | Linux arm64 | macOS |
+|---|---|---|
+| HTTP checks per second, sustained | 24,000+ (highest tested; 5.1 cores) | 8,000 (then out of local ports) |
+| HTTPS checks per second, sustained | 5,000 (then out of CPU) | 5,000 (then out of CPU) |
+| CPU per probe, whole pipeline | ~210 µs HTTP, ~1.3 ms HTTPS | ~230 µs HTTP, ~1.2 ms HTTPS |
+| Memory per check | ~18 KB | ~18 KB |
+
+At a 30-second interval, 24,000 probes a second would be 720,000 checks.
+
+- **The monitor's own pipeline is under a tenth of the CPU.** The scheduler,
+  metrics, SQLite history and alerting together take under 10% at 24,000
+  probes a second; the rest is probing: the kernel opening and closing a
+  fresh TCP connection per probe, the HTTP client, and garbage collection.
+  A goroutine and timer per check cost about 1%.
+- **TLS dominates HTTPS.** A handshake makes a probe six to eight times more
+  expensive than plain HTTP, mostly the key exchange: Go negotiates the
+  post-quantum hybrid X25519MLKEM768 by default, and its ML-KEM half costs
+  more than its X25519 half.
+- **Local ports run out before CPU.** Whichever side closes a connection
+  first holds its port in TIME_WAIT for 30 to 60 seconds. On macOS, whose
+  16,384 ephemeral ports are shared by the whole machine, HTTP probes failed
+  at 12,000 a second with three quarters of the CPU idle. Linux only needs a
+  port to be unique per destination, so in production, probing many hosts at
+  30-second intervals, the limit is far away. Probes still close
+  gracefully rather than with a reset that would avoid TIME_WAIT: a monitor
+  should not fill its targets' logs with connection resets.
+
+Numbers from the Oracle Ampere A1 node will be added once the service is
+deployed there.
+
 ## Development
 
 Requires Go 1.27.3 or later.
