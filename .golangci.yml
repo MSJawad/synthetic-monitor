@@ -1,0 +1,31 @@
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - bodyclose # unclosed HTTP response bodies leak connections and goroutines
+    - contextcheck # functions must pass their context on instead of starting a fresh one
+    - errorlint # wrapped errors must be compared with errors.Is and errors.As
+    - exhaustive # switches over enum types (check states, failure reasons) must cover every value
+    - gosec # security problems such as missing server timeouts or disabled TLS verification
+    - misspell
+    - modernize # use current language and standard library features
+    - nilerr # returning nil right after checking that an error is non-nil
+    - noctx # network calls must carry a context so they can be cancelled
+    - sloglint # consistent structured log calls
+    - thelper # test helpers call t.Helper so failures point at the caller
+    - unconvert
+    - usestdlibvars
+  settings:
+    sloglint:
+      kv-only: true
+      key-naming-case: snake
+  exclusions:
+    presets:
+      - std-error-handling # e.g. unchecked `defer resp.Body.Close()`
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
