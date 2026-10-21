@@ -36,7 +36,7 @@ func TestParseFlags(t *testing.T) {
 	}
 	want := options{configPath: "checks.yaml", listen: ":8080", historyPath: "history.db", retentionDays: 35,
 		maxConcurrent: 64, pollInterval: 5 * time.Second, shutdownTimeout: 30 * time.Second,
-		logLevel: slog.LevelDebug, sloInterval: 30 * time.Second}
+		logLevel: slog.LevelDebug, sloInterval: 30 * time.Second, flushTimeout: 5 * time.Second}
 	if o != want {
 		t.Errorf("options = %+v, want %+v", o, want)
 	}
@@ -141,7 +141,7 @@ func TestMonitor(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Poll rarely so that reloads in this test happen only on SIGHUP.
-	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second,
+	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second, flushTimeout: 5 * time.Second,
 		retentionDays: 35, sloInterval: 50 * time.Millisecond}
 	svc := &service{opts: o, logger: logger, watcher: watcher, history: history,
 		notifier: alert.LogNotifier{Logger: logger}, reload: reload}
@@ -239,6 +239,87 @@ func TestMonitor(t *testing.T) {
 		if logged := count(entries, "probe succeeded", check); total != logged {
 			t.Errorf("history holds %d results for %s, want the %d logged", total, check, logged)
 		}
+	}
+}
+
+// TestShutdownDeadline stops the service while a probe hangs past the
+// shutdown timeout: that probe is aborted, but the results of the others
+// are still written and shutdown succeeds.
+func TestShutdownDeadline(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{}, 1)
+	hangs := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done() // until the probe is aborted
+	}))
+	defer hangs.Close()
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer ok.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "checks.yaml")
+	writeFile(t, path, "checks:\n"+
+		"  - name: hangs\n    interval: 10s\n    http: {url: \""+hangs.URL+"\"}\n"+
+		"  - name: web\n    interval: 1s\n    http: {url: \""+ok.URL+"\"}\n")
+	watcher, cfg, err := config.NewWatcher(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyPath := filepath.Join(dir, "history.db")
+	history, err := store.Open(t.Context(), historyPath, store.Options{Retention: 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &logBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 200 * time.Millisecond,
+		flushTimeout: 5 * time.Second, retentionDays: 1, sloInterval: time.Minute}
+	svc := &service{opts: o, logger: logger, watcher: watcher, history: history,
+		notifier: alert.LogNotifier{Logger: logger}, reload: make(chan os.Signal)}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- svc.serve(ctx, ln, cfg) }()
+
+	select {
+	case <-entered:
+	case <-time.After(15 * time.Second): // the first probe starts within one interval
+		t.Fatal("no probe reached the hanging target")
+	}
+	logs.waitFor(t, "a successful probe of web", func(e []logEntry) bool { return count(e, "probe succeeded", "web") > 0 })
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("monitor = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("monitor did not stop")
+	}
+	entries := logs.entries()
+	if n := count(entries, "shutdown deadline reached", ""); n != 1 {
+		t.Errorf("logged %d shutdown deadlines, want 1, for the hanging probe only", n)
+	}
+
+	history, err = store.Open(t.Context(), historyPath, store.Options{Retention: 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer history.Close(context.Background())
+	total, _, err := history.Counts(t.Context(), "web", time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logged := count(entries, "probe succeeded", "web"); total != logged {
+		t.Errorf("history holds %d results for web, want the %d logged", total, logged)
 	}
 }
 

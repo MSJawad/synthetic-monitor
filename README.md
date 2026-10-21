@@ -55,7 +55,9 @@ topic can live in a secret:
 Edits to the checks file are applied within one poll interval, or at once on
 `SIGHUP`. An invalid file is rejected and logged, and the previous checks keep
 running. On `SIGTERM` or Ctrl-C, `/readyz` turns unready, no new probes start,
-and probes in flight finish before the process exits.
+and probes in flight get `-shutdown-timeout` to finish. Their results and
+notifications then get up to 5 more seconds to be written before the process
+exits.
 
 | Endpoint | Purpose |
 |---|---|
@@ -272,7 +274,9 @@ its schedule stops but a probe already running finishes and its result is
 recorded; a changed check's replacement waits for that probe before its own
 first run. Probes are only aborted if shutdown's grace period runs out, and
 an aborted probe's result is discarded because it says nothing about the
-target.
+target. Writing results and notifications afterwards has a deadline of its
+own, so a probe that hangs until the grace period ends cannot leave the
+others' results unwritten.
 
 ### Reloads change only what changed
 

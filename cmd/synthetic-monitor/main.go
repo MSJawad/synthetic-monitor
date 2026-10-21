@@ -47,6 +47,7 @@ type options struct {
 	shutdownTimeout time.Duration
 	logLevel        slog.Level
 	sloInterval     time.Duration // not a flag: tests shorten it
+	flushTimeout    time.Duration // not a flag
 }
 
 func (o options) retention() time.Duration {
@@ -54,7 +55,7 @@ func (o options) retention() time.Duration {
 }
 
 func parseFlags(args []string) (options, error) {
-	o := options{sloInterval: 30 * time.Second}
+	o := options{sloInterval: 30 * time.Second, flushTimeout: 5 * time.Second}
 	flags := flag.NewFlagSet("synthetic-monitor", flag.ContinueOnError)
 	flags.StringVar(&o.configPath, "config", "", "path to the checks file (required)")
 	flags.StringVar(&o.listen, "listen", ":8080", "address of the HTTP server for metrics and health checks")
@@ -179,9 +180,9 @@ type service struct {
 // serve runs the monitor with cfg until ctx is cancelled, then shuts down in
 // an order that loses no results: report not ready, stop config reloads and
 // SLO evaluation, let probes in flight finish (aborting them if
-// shutdownTimeout runs out), evaluate their results for alerts and deliver
-// what they raise, write the queued history, and stop the HTTP server last
-// so health checks keep answering meanwhile.
+// shutdownTimeout runs out), then, within flushTimeout, evaluate their
+// results for alerts and deliver what they raise, write the queued history,
+// and stop the HTTP server last so health checks keep answering meanwhile.
 func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config) error {
 	logger := s.logger
 	m := metrics.New()
@@ -271,21 +272,26 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	stopBackground()
 	background.Wait() // no reload can start checks from here on
 
-	// ctx is already cancelled, so shutdown needs its own deadline.
-	// WithoutCancel keeps ctx's values but drops its cancellation.
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.opts.shutdownTimeout)
-	defer cancel()
+	// ctx is already cancelled, so shutdown needs deadlines of its own.
+	// WithoutCancel keeps ctx's values but drops its cancellation. Probes get
+	// shutdownTimeout; writing results and notifications then gets
+	// flushTimeout of its own, so probes that run out the clock do not cost
+	// the results of those that finished.
+	probesCtx, cancelProbes := context.WithTimeout(context.WithoutCancel(ctx), s.opts.shutdownTimeout)
+	defer cancelProbes()
 	logger.Info("waiting for probes in flight", "probes", sched.InFlight(), "timeout", s.opts.shutdownTimeout.String())
-	if stopErr := sched.Stop(shutdownCtx); stopErr != nil {
+	if stopErr := sched.Stop(probesCtx); stopErr != nil {
 		logger.Warn("shutdown deadline reached", "err", stopErr)
 	}
-	if closeErr := alerts.Close(shutdownCtx); closeErr != nil {
+	flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), s.opts.flushTimeout)
+	defer cancelFlush()
+	if closeErr := alerts.Close(flushCtx); closeErr != nil {
 		logger.Warn("shutdown deadline reached", "err", closeErr)
 	}
-	if closeErr := s.history.Close(shutdownCtx); closeErr != nil {
+	if closeErr := s.history.Close(flushCtx); closeErr != nil {
 		err = errors.Join(err, fmt.Errorf("closing history: %w", closeErr))
 	}
-	if shutErr := srv.Shutdown(shutdownCtx); shutErr != nil {
+	if shutErr := srv.Shutdown(flushCtx); shutErr != nil {
 		_ = srv.Close()
 		err = errors.Join(err, fmt.Errorf("http shutdown: %w", shutErr))
 	}

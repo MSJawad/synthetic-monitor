@@ -109,7 +109,7 @@ func startMonitor(t *testing.T, path, historyPath, ntfyURL string) *runningMonit
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second,
+	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second, flushTimeout: 5 * time.Second,
 		retentionDays: 1, sloInterval: time.Minute}
 	svc := &service{opts: o, logger: logger, watcher: watcher, history: history, notifier: notifier,
 		reload: make(chan os.Signal)}
