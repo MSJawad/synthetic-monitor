@@ -44,3 +44,24 @@ A Git tag such as `v7` can be moved to point at different code, so a
 compromised action repository can change what runs in CI without any change
 to this repository. Pinning to a full commit SHA makes the workflow run exactly
 the reviewed code. Each pin carries a comment with its version for readability.
+
+### Config: strict YAML, one block per check type
+
+The checks file is decoded with `go.yaml.in/yaml/v3`, the YAML organisation's
+maintained continuation of `gopkg.in/yaml.v3` (whose author marked it
+unmaintained in April 2025). `sigs.k8s.io/yaml` was the alternative: it
+converts YAML to JSON and reuses `encoding/json`, but it is a wrapper over the
+same parser and adds a conversion step.
+
+Unknown fields are rejected. A typo such as `timout: 5s` would otherwise be
+silently ignored and the check would run with the default timeout, which is
+the kind of bug that only shows up during an incident. Durations must carry a
+unit (`30s`, not `30`), and every validation problem is reported at once.
+
+A check's type comes from which block it sets (`http:`, `tcp:`, `dns:` or
+`tls:`) instead of a separate `type:` field, so a type and its settings can
+never disagree. Shared settings use YAML anchors rather than a custom
+`defaults:` section.
+
+The check `name` is its identity: config reloads, metrics, history and alert
+state are all keyed by it.
