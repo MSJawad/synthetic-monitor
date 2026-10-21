@@ -7,12 +7,15 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"syscall"
 	"testing"
 	"time"
 
 	"go.uber.org/goleak"
+
+	"github.com/MSJawad/synthetic-monitor/internal/config"
 )
 
 func TestMain(m *testing.M) {
@@ -101,6 +104,7 @@ func TestClassify(t *testing.T) {
 		{"connection refused", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, ReasonConnect},
 		{"untrusted certificate", inURLError(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), ReasonTLS},
 		{"not a TLS server", tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}, ReasonTLS},
+		{"https URL on a plain HTTP server", inURLError(http.ErrSchemeMismatch), ReasonTLS},
 		{"handshake alert", &net.OpError{Op: "remote error", Err: errors.New("tls: handshake failure")}, ReasonTLS},
 		{"reset while reading", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, ReasonOther},
 		{"truncated body", io.ErrUnexpectedEOF, ReasonOther},
@@ -112,4 +116,28 @@ func TestClassify(t *testing.T) {
 			}
 		})
 	}
+}
+
+// run probes c through New, as the scheduler does, filling in the fields a
+// test does not care about.
+func run(t *testing.T, c config.Check, opts Options) Result {
+	t.Helper()
+	c.Name, c.Interval = "test", time.Minute
+	if c.Timeout == 0 {
+		c.Timeout = 2 * time.Second
+	}
+	return New(c, opts).Probe(t.Context())
+}
+
+// wantReason fails the test unless r failed with want, or succeeded if want
+// is empty.
+func wantReason(t *testing.T, r Result, want Reason) {
+	t.Helper()
+	if r.Reason == want {
+		return
+	}
+	if want == "" {
+		t.Fatalf("probe failed with %q (%v), want success", r.Reason, r.Err)
+	}
+	t.Fatalf("reason = %q (err: %v), want %q", r.Reason, r.Err, want)
 }

@@ -65,3 +65,24 @@ never disagree. Shared settings use YAML anchors rather than a custom
 
 The check `name` is its identity: config reloads, metrics, history and alert
 state are all keyed by it.
+
+### HTTP probes open a fresh connection every time
+
+Keep-alives are disabled, so every probe resolves DNS, connects and completes
+a TLS handshake, as a new visitor would. With connection reuse, a broken DNS
+record or an expired certificate could go unnoticed for as long as an old
+connection stayed open, and latency would look better than real users see it.
+The cost is a little more work per probe, which is negligible at monitoring
+rates. `httptrace` splits each probe's time into DNS, connect, TLS, server
+processing and transfer, so a slow probe shows where the time went.
+
+### One wrapper owns timeouts
+
+Each probe type only knows how to do its own work and classify its own
+errors. A shared wrapper applies the check's timeout through the context,
+measures duration and enforces `max_latency`. When the deadline expires, a
+probe can fail with many different errors (an i/o timeout, a cancelled read,
+a DNS timeout); the wrapper reports all of them as `timeout`, so the failure
+reason does not depend on which step was running at the time. A probe
+cancelled by its caller, for example at shutdown, is reported as `canceled`
+and is not the target's fault.

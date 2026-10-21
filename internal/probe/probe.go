@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"time"
+
+	"github.com/MSJawad/synthetic-monitor/internal/config"
 )
 
 // Reason classifies why a probe failed. The set is small and fixed so it can
@@ -39,6 +42,8 @@ type Result struct {
 	Reason Reason
 	// Err describes the failure for logs and the status page.
 	Err error
+	// Phases breaks down an HTTP probe's duration. It is zero for other types.
+	Phases HTTPPhases
 	// CertNotAfter is when a TLS check's certificate chain stops verifying.
 	// It is zero for other types and when the handshake failed.
 	CertNotAfter time.Time
@@ -59,6 +64,19 @@ type Options struct {
 	// RootCAs verifies server certificates. Nil uses the system roots; tests
 	// set it to trust their own certificate authority.
 	RootCAs *x509.CertPool
+}
+
+// New returns the prober for check c, which must have passed config
+// validation.
+func New(c config.Check, opts Options) Prober {
+	var p Prober
+	switch {
+	case c.HTTP != nil:
+		p = newHTTP(c.HTTP, opts)
+	default:
+		panic(fmt.Sprintf("probe: check %q has no probe type", c.Name))
+	}
+	return &limited{next: p, timeout: c.Timeout, maxLatency: c.MaxLatency}
 }
 
 // limited wraps a type-specific prober with the behaviour every check shares:
@@ -107,6 +125,10 @@ func classify(err error) Reason {
 	case errors.As(err, &dnsErr):
 		return ReasonDNS
 	case errors.As(err, &verifyErr), errors.As(err, &recordErr):
+		return ReasonTLS
+	case errors.Is(err, http.ErrSchemeMismatch):
+		// net/http's replacement for the record error when an https URL
+		// reaches a plain HTTP server.
 		return ReasonTLS
 	case errors.As(err, &opErr) && opErr.Op == "remote error":
 		// The server aborted the handshake with a TLS alert.
