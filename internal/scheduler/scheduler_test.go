@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"sync"
 	"testing"
@@ -45,32 +46,42 @@ func TestFirstProbeWithinIntervalThenFixedCadence(t *testing.T) {
 	})
 }
 
-func TestChecksStartSpreadAcrossInterval(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		h := newHarness(t, 100)
-		var checks []config.Check
-		for i := range 100 {
-			checks = append(checks, check(string(rune('a'+i%26))+string(rune('a'+i/26)), 10*time.Second))
-		}
-		h.sched.Apply(checks)
-		time.Sleep(10 * time.Second)
-		synctest.Wait()
+func TestFirstProbesSpreadOverIntervalOrFirstMinute(t *testing.T) {
+	tests := []struct {
+		interval, spread time.Duration
+	}{
+		{10 * time.Second, 10 * time.Second}, // the whole interval
+		{time.Hour, time.Minute},             // capped, so hourly checks report within a minute
+	}
+	for _, tt := range tests {
+		t.Run(tt.interval.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h := newHarness(t, 100)
+				var checks []config.Check
+				for i := range 100 {
+					checks = append(checks, check(fmt.Sprintf("c%d", i), tt.interval))
+				}
+				h.sched.Apply(checks)
+				time.Sleep(tt.spread)
+				synctest.Wait()
 
-		seconds := make(map[time.Duration]bool)
-		for _, c := range checks {
-			starts := h.startsOf(c.Name)
-			if len(starts) == 0 || starts[0] >= 10*time.Second {
-				t.Fatalf("check %s first ran at %v, want within the first 10s", c.Name, starts)
-			}
-			seconds[starts[0].Truncate(time.Second)] = true
-		}
-		// With 100 uniformly random start times, missing more than two of
-		// the ten one-second buckets has a probability below 1e-13.
-		if len(seconds) < 8 {
-			t.Errorf("100 checks started in only %d distinct seconds of 10; want them spread out", len(seconds))
-		}
-		h.stop()
-	})
+				buckets := make(map[time.Duration]bool)
+				for _, c := range checks {
+					starts := h.startsOf(c.Name)
+					if len(starts) == 0 || starts[0] >= tt.spread {
+						t.Fatalf("check %s first ran at %v, want within %v", c.Name, starts, tt.spread)
+					}
+					buckets[starts[0]/(tt.spread/10)] = true
+				}
+				// With 100 uniformly random start times, missing more than
+				// two of ten equal buckets has a probability below 1e-13.
+				if len(buckets) < 8 {
+					t.Errorf("first probes fell in only %d of 10 equal parts of %v; want them spread out", len(buckets), tt.spread)
+				}
+				h.stop()
+			})
+		})
+	}
 }
 
 func TestOverrunningProbeSkipsMissedSlots(t *testing.T) {

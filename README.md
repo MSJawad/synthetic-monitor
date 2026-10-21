@@ -151,9 +151,11 @@ one goroutine per check, stopping a check is cancelling its context, and a
 goroutine costs a few kilobytes, so even ten thousand checks are cheap. The
 benchmarks measure where this design stops being enough.
 
-Each check starts at a random point within its interval, so checks that
-share an interval do not all fire together after a start or reload. After
-that it keeps a fixed cadence: the next run is one interval after the
+Each check's first probe comes at a random point within its interval, so
+checks that share an interval do not all fire together after a start or
+reload. The spread is capped at one minute: spreading an hourly check's
+first probe over a whole hour would leave it without data for up to an hour
+after every deploy. After that it keeps a fixed cadence: the next run is one interval after the
 previous run was *scheduled*, not after it finished, so probe duration does
 not make checks drift into alignment. A run that overruns its next slot (by
 waiting for a free slot under the concurrency limit) skips the missed slots

@@ -39,10 +39,15 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// Scheduler runs one goroutine per check. Each check starts at a random
-// point within its interval, so checks sharing an interval do not fire in
-// lockstep, and then keeps a fixed cadence. A check never runs two probes at
-// once.
+// maxInitialSpread bounds how long after a start or reload a check's first
+// probe can come, so every check reports within it even if its interval is
+// an hour.
+const maxInitialSpread = time.Minute
+
+// Scheduler runs one goroutine per check. Each check's first probe comes at
+// a random point within its interval (or within maxInitialSpread, if that is
+// shorter), so checks do not fire in lockstep, and then keeps a fixed
+// cadence. A check never runs two probes at once.
 //
 // Stopping is split in two. Stopping a check's schedule (when the check is
 // removed or changed, or the scheduler stops) prevents new probes but lets
@@ -198,7 +203,7 @@ func (s *Scheduler) start(c config.Check, after <-chan struct{}) *runner {
 // run probes r's check on a fixed cadence until ctx ends.
 func (s *Scheduler) run(ctx context.Context, r *runner) {
 	interval := r.check.Interval
-	next := time.Now().Add(rand.N(interval)) //nolint:gosec // spreading load needs no unpredictability
+	next := time.Now().Add(rand.N(min(interval, maxInitialSpread))) //nolint:gosec // spreading load needs no unpredictability
 	timer := time.NewTimer(time.Until(next))
 	defer timer.Stop()
 	for {
