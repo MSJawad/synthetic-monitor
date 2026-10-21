@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{{.Refresh}}">
+<title>{{.Headline}} · Status</title>
+<link rel="icon" href="{{.Favicon}}">
+<link rel="stylesheet" href="{{.CSS}}">
+</head>
+<body>
+<main class="page">
+  <header class="masthead">
+    <h1 class="title">Status</h1>
+    <p class="headline" data-state="{{.State}}">{{template "icon" .State}}<span>{{.Headline}}</span></p>
+    <p class="updated">Updated {{.Generated}}, refreshes every {{.Refresh}} seconds</p>
+  </header>
+
+  <ul class="checks">
+  {{- range .Checks}}
+    <li class="check" data-state="{{.State}}">
+      <div class="check-head">
+        <h2 class="check-name">{{.Name}}</h2>
+        <span class="check-type">{{.Type}}</span>
+        <span class="pill" data-state="{{.State}}">{{template "icon" .State}}{{.Label}}</span>
+      </div>
+      <p class="check-meta">{{if .Since}}{{.Since}}. {{end}}<span class="nowrap">{{.Checked}}</span></p>
+
+      <div class="metrics">
+        <section class="metric">
+          <h3 class="metric-label">Latency</h3>
+          {{- if .Latency}}
+          <p class="metric-value">{{.Latency}}{{with .Note}}<span class="metric-aside">{{.}}</span>{{end}}</p>
+          {{- else}}
+          <p class="metric-value metric-none">No data</p>
+          {{- end}}
+          {{- with .Spark}}{{if .Count}}
+          <svg class="spark" width="100%" height="48" role="img" aria-label="Latency: {{.Caption}}">
+            <line class="spark-base" x1="0" x2="100%" y1="42" y2="42"/>
+            {{- range .Failures}}
+            <rect class="spark-fail" x="{{.X}}" y="0" width="{{.Width}}" height="42"/>
+            <rect class="spark-fail-mark" x="{{.X}}" y="41" width="{{.Width}}" height="3"/>
+            {{- end}}
+            {{- range .Segments}}
+            <line class="spark-line" x1="{{.X1}}" y1="{{.Y1}}" x2="{{.X2}}" y2="{{.Y2}}"/>
+            {{- end}}
+            {{- with .End}}
+            <circle class="spark-end" cx="{{.X}}" cy="{{.Y}}" r="4"/>
+            {{- end}}
+            {{- range .Hits}}
+            <rect class="spark-hit" x="{{.X}}" y="0" width="{{.Width}}" height="48"><title>{{.Title}}</title></rect>
+            {{- end}}
+          </svg>
+          <p class="metric-caption">{{.Caption}}</p>
+          {{- end}}{{end}}
+        </section>
+
+        <section class="metric">
+          {{- with .SLO}}
+          <h3 class="metric-label">Availability, last {{.Window}}</h3>
+          <p class="metric-value">{{.Availability}}<span class="metric-aside">target {{.Target}}</span></p>
+          <svg class="meter" data-level="{{.Meter.Level}}" width="100%" height="6" role="img" aria-label="{{.Budget}}">
+            <rect class="meter-track" width="100%" height="6" rx="3"/>
+            <rect class="meter-fill" width="{{.Meter.Fill}}%" height="6" rx="3"/>
+          </svg>
+          <p class="metric-caption">
+            {{- if eq .Meter.Level "low"}}<span class="caption-icon" data-state="failing">{{template "icon" "warning"}}</span>{{end}}
+            {{- if eq .Meter.Level "exhausted"}}<span class="caption-icon" data-state="down">{{template "icon" "warning"}}</span>{{end}}
+            {{- .Budget}}</p>
+          {{- else}}
+          <h3 class="metric-label">Availability</h3>
+          <p class="metric-value metric-none">No SLO set</p>
+          {{- end}}
+        </section>
+      </div>
+
+      {{- if .Probes}}
+      <details class="probes">
+        <summary>Recent probes</summary>
+        <table>
+          <thead><tr><th scope="col">Time</th><th scope="col">Result</th><th scope="col" class="num">Latency</th></tr></thead>
+          <tbody>
+          {{- range .Probes}}
+            <tr{{if not .OK}} class="failed"{{end}}><td>{{.Time}}</td><td>{{.Result}}</td><td class="num">{{.Latency}}</td></tr>
+          {{- end}}
+          </tbody>
+        </table>
+      </details>
+      {{- end}}
+    </li>
+  {{- else}}
+    <li class="check empty">No checks are configured.</li>
+  {{- end}}
+  </ul>
+
+  <footer class="footer">Monitored by synthetic-monitor</footer>
+</main>
+</body>
+</html>
+{{- define "icon"}}<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+{{- if eq . "up"}}<circle class="icon-shape" cx="8" cy="8" r="7"/><path class="icon-glyph" d="M4.8 8.3l2.1 2.1 4.3-4.6"/>
+{{- else if eq . "down"}}<circle class="icon-shape" cx="8" cy="8" r="7"/><path class="icon-glyph" d="M5.6 5.6l4.8 4.8m0-4.8l-4.8 4.8"/>
+{{- else if eq . "pending"}}<circle class="icon-ring" cx="8" cy="8" r="6"/>
+{{- else}}<path class="icon-shape" d="M8 1.8l6.6 11.9H1.4z"/><path class="icon-glyph" d="M8 6.2v3.3m0 2.1v.1"/>
+{{- end}}</svg>{{end}}
