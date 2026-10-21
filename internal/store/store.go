@@ -103,8 +103,12 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 
 	// WAL lets the status page read while the writer writes. synchronous
 	// NORMAL is safe with WAL; a power loss can only lose the last few
-	// transactions, an acceptable loss for monitoring history.
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	// transactions, an acceptable loss for monitoring history. Immediate
+	// transactions take the write lock when they begin, so concurrent
+	// writers wait their turn under busy_timeout instead of failing with
+	// SQLITE_BUSY when two deferred transactions both try to upgrade.
+	// _dqs=0 makes a mistyped "identifier" an error, not a string literal.
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_txlock=immediate&_dqs=0")
 	if err != nil {
 		return nil, err
 	}
