@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net/http"
 	"net/netip"
 	"reflect"
@@ -172,7 +173,7 @@ checks:
     tcp: {address: "a:1"}`, "max_latency 2s must be less than the timeout 2s"},
 		{"no type", `
 checks:
-  - name: a`, "exactly one of http, tcp, dns or tls must be set, found 0"},
+  - name: a`, "exactly one of http, tcp, dns, tls or steps must be set, found 0"},
 		{"two types", `
 checks:
   - name: a
@@ -235,6 +236,32 @@ checks:
 checks:
   - name: a
     tls: {address: "a:443", min_days_remaining: -1}`, "must not be negative"},
+		{"step without a name", `
+checks:
+  - name: a
+    steps: [{url: "http://a"}]`, `steps[0] "": name is required`},
+		{"duplicate step name", `
+checks:
+  - name: a
+    steps: [{name: s, url: "http://a"}, {name: s, url: "http://b"}]`, `steps[1] "s": duplicate step name`},
+		{"variable used before it is extracted", `
+checks:
+  - name: a
+    steps:
+      - {name: one, url: "http://a", headers: {Authorization: "Bearer ${token}"}}
+      - {name: two, url: "http://a", extract: {token: data.token}}`, `steps[0] "one": headers["Authorization"] refers to ${token}, which is not set`},
+		{"invalid extracted name", `
+checks:
+  - name: a
+    steps: [{name: s, url: "http://a", extract: {my-token: token}}]`, `extract: "my-token" is not a valid variable name`},
+		{"empty path segment", `
+checks:
+  - name: a
+    steps: [{name: s, url: "http://a", extract: {token: data..token}}]`, `path "data..token" must be dot-separated`},
+		{"invalid step request", `
+checks:
+  - name: a
+    steps: [{name: s, url: "nope"}]`, `steps[0] "s": url "nope" must be an absolute`},
 		{"unknown method", `
 checks:
   - name: a
@@ -367,5 +394,40 @@ func TestExpand(t *testing.T) {
 		if got := Expand(tt.in, lookup); got != tt.want {
 			t.Errorf("Expand(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestParseSteps(t *testing.T) {
+	env := func(name string) (string, bool) { return "hunter2", name == "PASSWORD" }
+	cfg, err := Parse([]byte(`
+checks:
+  - name: sign-in
+    interval: 5m
+    steps:
+      - name: sign in
+        method: POST
+        url: https://api.example.com/signin
+        body: '{"password": "${PASSWORD}"}'
+        extract: {token: data.token}
+      - name: profile
+        url: https://api.example.com/me
+        headers: {Authorization: "Bearer ${token}"}
+        body_contains: probe@example.com
+`), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cfg.Checks[0]
+	if c.Type() != "steps" || len(c.Steps) != 2 || c.Steps[1].Method != http.MethodGet || c.Steps[0].Extract["token"] != "data.token" {
+		t.Fatalf("check = %+v, want 2 steps of type steps, the second a GET", c)
+	}
+
+	var many strings.Builder
+	many.WriteString("checks:\n  - name: a\n    steps:\n")
+	for i := range MaxSteps + 1 {
+		fmt.Fprintf(&many, "      - {name: s%d, url: \"http://a\"}\n", i)
+	}
+	if _, err := Parse([]byte(many.String()), noEnv); err == nil || !strings.Contains(err.Error(), "at most 10 are allowed") {
+		t.Errorf("11 steps: error = %v, want a limit of 10", err)
 	}
 }

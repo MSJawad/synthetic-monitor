@@ -40,8 +40,8 @@ type Config struct {
 	Version string `yaml:"-"`
 }
 
-// Check is one endpoint probed on a schedule. Exactly one of HTTP, TCP, DNS
-// and TLS is set, and it determines the check's type.
+// Check is one endpoint probed on a schedule. Exactly one of HTTP, TCP, DNS,
+// TLS and Steps is set, and it determines the check's type.
 type Check struct {
 	// Name identifies the check across config reloads and in metrics,
 	// history and alerts, so renaming a check starts it from scratch.
@@ -63,6 +63,9 @@ type Check struct {
 	TCP  *TCP  `yaml:"tcp"`
 	DNS  *DNS  `yaml:"dns"`
 	TLS  *TLS  `yaml:"tls"`
+	// Steps, if set, makes the check a sequence of HTTP requests, such as
+	// signing in and then fetching a page with the session.
+	Steps []Step `yaml:"steps"`
 }
 
 // SLO is an availability objective: at least Target percent of probes
@@ -103,6 +106,20 @@ type HTTP struct {
 	BodyContains string `yaml:"body_contains"`
 }
 
+// MaxSteps limits a multi-step check, which shares one timeout.
+const MaxSteps = 10
+
+// Step is one request of a multi-step check. Steps run in order with one
+// cookie jar, and the check fails at the first step that fails.
+type Step struct {
+	Name string `yaml:"name"`
+	HTTP `yaml:",inline"`
+	// Extract sets variables for later steps' templates from this step's
+	// JSON response: each maps a variable name to a dotted path such as
+	// data.token or items.0.id.
+	Extract map[string]string `yaml:"extract"`
+}
+
 // TCP checks that a TCP connection to Address (host:port) can be opened.
 type TCP struct {
 	Address string `yaml:"address"`
@@ -128,10 +145,12 @@ type TLS struct {
 	MinDaysRemaining int    `yaml:"min_days_remaining"`
 }
 
-// Type returns the name of the check's probe type: "http", "tcp", "dns" or
-// "tls".
+// Type returns the name of the check's probe type: "http", "tcp", "dns",
+// "tls" or "steps".
 func (c Check) Type() string {
 	switch {
+	case len(c.Steps) > 0:
+		return "steps"
 	case c.HTTP != nil:
 		return "http"
 	case c.TCP != nil:
@@ -187,6 +206,9 @@ func (c *Check) applyDefaults() {
 	}
 	if c.HTTP != nil {
 		c.HTTP.applyDefaults()
+	}
+	for i := range c.Steps {
+		c.Steps[i].applyDefaults()
 	}
 	if c.DNS != nil && c.DNS.Server != "" {
 		if _, _, err := net.SplitHostPort(c.DNS.Server); err != nil {
@@ -255,13 +277,13 @@ func (cfg *Config) validate(env Env) error {
 		}
 
 		types := 0
-		for _, set := range []bool{c.HTTP != nil, c.TCP != nil, c.DNS != nil, c.TLS != nil} {
+		for _, set := range []bool{c.HTTP != nil, c.TCP != nil, c.DNS != nil, c.TLS != nil, len(c.Steps) > 0} {
 			if set {
 				types++
 			}
 		}
 		if types != 1 {
-			fail("exactly one of http, tcp, dns or tls must be set, found %d", types)
+			fail("exactly one of http, tcp, dns, tls or steps must be set, found %d", types)
 			continue
 		}
 
@@ -269,6 +291,10 @@ func (cfg *Config) validate(env Env) error {
 		case c.HTTP != nil:
 			for _, err := range c.HTTP.validate(envVars(env)) {
 				fail("http.%v", err)
+			}
+		case len(c.Steps) > 0:
+			for _, err := range validateSteps(c.Steps, env) {
+				fail("%v", err)
 			}
 		case c.TCP != nil:
 			if err := checkHostPort(c.TCP.Address); err != nil {
@@ -351,6 +377,55 @@ func (h *HTTP) validate(checkVar func(name string) error) []error {
 	for _, code := range h.ExpectStatus {
 		if code < 100 || code > 599 {
 			fail("expect_status %d is not a valid HTTP status code", code)
+		}
+	}
+	return errs
+}
+
+// validateSteps returns the problems with a multi-step check's steps. A
+// template in one step may refer to variables extracted by an earlier
+// step; any other name must be an environment variable.
+func validateSteps(steps []Step, env Env) []error {
+	var errs []error
+	if len(steps) > MaxSteps {
+		errs = append(errs, fmt.Errorf("steps: %d steps, at most %d are allowed", len(steps), MaxSteps))
+	}
+	extracted := make(map[string]bool)
+	names := make(map[string]bool)
+	fromEnv := envVars(env)
+	for i, st := range steps {
+		fail := func(format string, args ...any) {
+			errs = append(errs, fmt.Errorf("steps[%d] %q: %s", i, st.Name, fmt.Sprintf(format, args...)))
+		}
+		switch {
+		case st.Name == "":
+			fail("name is required")
+		case names[st.Name]:
+			fail("duplicate step name")
+		}
+		names[st.Name] = true
+		for _, err := range st.validate(func(name string) error {
+			if extracted[name] {
+				return nil
+			}
+			return fromEnv(name)
+		}) {
+			fail("%v", err)
+		}
+		// Extracted variables become visible to the steps after this one.
+		for name, path := range st.Extract {
+			if !varName.MatchString(name) {
+				fail("extract: %q is not a valid variable name", name)
+			}
+			if extracted[name] {
+				fail("extract: %s is already extracted by an earlier step", name)
+			}
+			if path == "" || slices.Contains(strings.Split(path, "."), "") {
+				fail("extract: %s: path %q must be dot-separated keys or indexes, such as data.token", name, path)
+			}
+		}
+		for name := range st.Extract {
+			extracted[name] = true
 		}
 	}
 	return errs

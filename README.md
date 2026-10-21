@@ -633,3 +633,18 @@ unset or empty rejects the whole config: an empty secret is a deployment
 mistake, and sending it would turn into a confusing stream of 401s instead
 of one clear error at startup. Only `${NAME}` is special; a lone `$` is
 literal, and `$$` writes one, so ordinary JSON bodies need no escaping.
+
+### Multi-step checks start a new session every run
+
+A `steps` check sends a sequence of requests, such as signing in and then
+fetching a page that needs the session. Values pass between steps two ways:
+cookies, kept in a cookie jar, and variables extracted from a JSON response
+by a dotted path (`data.token`) and used in a later step's headers or body as
+`${token}`. Each run gets a new, empty jar, for the same reason each probe
+opens a new connection: the check should see what a new visitor sees. A jar
+kept between runs would let a session from the last run hide a broken
+sign-in. The check fails at the first failing step and names it in the
+error. Extraction errors name the path that was missing, never the values
+around it, because a response to a sign-in is full of secrets. A run shares
+one timeout across all its steps, since the question is whether the journey
+as a whole works in time.

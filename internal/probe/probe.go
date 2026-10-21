@@ -88,6 +88,8 @@ func (o Options) lookupEnv() func(name string) string {
 func New(c config.Check, opts Options) Prober {
 	var p Prober
 	switch {
+	case len(c.Steps) > 0:
+		p = newSteps(c.Steps, opts)
 	case c.HTTP != nil:
 		p = newHTTP(c.HTTP, opts)
 	case c.TCP != nil:
