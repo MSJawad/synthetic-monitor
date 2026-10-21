@@ -1,0 +1,27 @@
+# Example checks against public endpoints. Run with:
+#   go run ./cmd/synthetic-monitor -config examples/checks.yaml -log-level debug
+checks:
+  - name: example-web
+    interval: 30s
+    timeout: 10s
+    max_latency: 3s
+    http:
+      url: https://example.com/
+      body_contains: Example Domain
+
+  - name: example-cert
+    interval: 1h
+    tls:
+      address: example.com:443
+
+  - name: cloudflare-dns
+    interval: 1m
+    dns:
+      host: one.one.one.one.
+      server: 1.1.1.1
+      expect_addresses: [1.1.1.1, 1.0.0.1]
+
+  - name: cloudflare-dns-port
+    interval: 1m
+    tcp:
+      address: 1.1.1.1:53

@@ -7,12 +7,36 @@ it recovers.
 
 Status: v1 in progress.
 
+## Running
+
+```sh
+go run ./cmd/synthetic-monitor -config examples/checks.yaml -log-level debug
+```
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-config` | (required) | checks file, see [`examples/checks.yaml`](examples/checks.yaml) |
+| `-listen` | `:8080` | HTTP server address |
+| `-max-concurrent-probes` | `64` | cap on probes in flight across all checks |
+| `-config-poll-interval` | `5s` | how often the checks file is checked for changes |
+| `-shutdown-timeout` | `30s` | how long probes in flight get to finish after SIGTERM |
+| `-log-level` | `info` | `debug` also logs every successful probe |
+
+Edits to the checks file are applied within one poll interval, or at once on
+`SIGHUP`. An invalid file is rejected and logged, and the previous checks keep
+running. On `SIGTERM` or Ctrl-C, `/readyz` turns unready, no new probes start,
+and probes in flight finish before the process exits.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | liveness: the process is up |
+| `GET /readyz` | readiness: `503` once shutdown has started |
+
 ## Development
 
 Requires Go 1.27.3 or later.
 
 ```sh
-go run ./cmd/synthetic-monitor        # serves http://localhost:8080/healthz
 go test -race ./...
 golangci-lint run
 ```

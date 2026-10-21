@@ -1,83 +1,182 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"go.uber.org/goleak"
+
+	"github.com/MSJawad/synthetic-monitor/internal/config"
 )
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-func TestHealthz(t *testing.T) {
-	rec := httptest.NewRecorder()
-	newMux().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+func TestParseFlags(t *testing.T) {
+	o, err := parseFlags([]string{"-config", "checks.yaml", "-log-level", "debug"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rec.Body.String(); got != "ok\n" {
-		t.Fatalf("body = %q, want %q", got, "ok\n")
+	want := options{configPath: "checks.yaml", listen: ":8080", maxConcurrent: 64,
+		pollInterval: 5 * time.Second, shutdownTimeout: 30 * time.Second, logLevel: slog.LevelDebug}
+	if o != want {
+		t.Errorf("options = %+v, want %+v", o, want)
+	}
+
+	for _, args := range [][]string{
+		{},
+		{"-config", "c.yaml", "-max-concurrent-probes", "0"},
+		{"-config", "c.yaml", "-shutdown-timeout", "0s"},
+		{"-config", "c.yaml", "-log-level", "loud"},
+	} {
+		if _, err := parseFlags(args); err == nil {
+			t.Errorf("parseFlags(%q) succeeded, want an error", args)
+		}
 	}
 }
 
-func TestServeFinishesInFlightRequestsOnShutdown(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	slow := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		close(started)
-		<-release
-		_, _ = io.WriteString(w, "done")
-	})
+func TestHealthAndReadiness(t *testing.T) {
+	var ready atomic.Bool
+	mux := newMux(&ready)
+	status := func(path string) int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+		return rec.Code
+	}
 
+	ready.Store(true)
+	if h, r := status("/healthz"), status("/readyz"); h != http.StatusOK || r != http.StatusOK {
+		t.Errorf("while running: healthz %d, readyz %d; want 200, 200", h, r)
+	}
+	ready.Store(false)
+	if h, r := status("/healthz"), status("/readyz"); h != http.StatusOK || r != http.StatusServiceUnavailable {
+		t.Errorf("while shutting down: healthz %d, readyz %d; want 200, 503", h, r)
+	}
+}
+
+// TestMonitor runs the service against a real HTTP target and observes it
+// only through its logs and HTTP endpoints, as an operator would.
+func TestMonitor(t *testing.T) {
+	var holding atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if holding.Load() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer target.Close()
+	targetAddr := strings.TrimPrefix(target.URL, "http://")
+
+	path := filepath.Join(t.TempDir(), "checks.yaml")
+	web := "  - name: web\n    interval: 2s\n    timeout: 2s\n    http: {url: \"" + target.URL + "\"}\n"
+	writeFile(t, path, "checks:\n"+web)
+	watcher, cfg, err := config.NewWatcher(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &logBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	base := "http://" + ln.Addr().String()
+	reload := make(chan os.Signal, 1)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	served := make(chan error, 1)
-	go func() { served <- serve(ctx, ln, slow, slog.New(slog.DiscardHandler)) }()
+	// Poll rarely so that reloads in this test happen only on SIGHUP.
+	o := options{maxConcurrent: 4, pollInterval: time.Hour, shutdownTimeout: 10 * time.Second}
+	done := make(chan error, 1)
+	go func() { done <- monitor(ctx, ln, watcher, cfg, reload, o, logger) }()
 
-	type result struct {
-		status int
-		body   string
-		err    error
+	waitForStatus(t, base+"/readyz", http.StatusOK)
+	logs.waitFor(t, "a successful probe of web", func(e []logEntry) bool { return count(e, "probe succeeded", "web") > 0 })
+
+	// SIGHUP applies an edited config without a restart.
+	writeFile(t, path, "checks:\n"+web+"  - name: port\n    interval: 1s\n    tcp: {address: \""+targetAddr+"\"}\n")
+	reload <- syscall.SIGHUP
+	logs.waitFor(t, "a successful probe of the added check", func(e []logEntry) bool { return count(e, "probe succeeded", "port") > 0 })
+
+	// An invalid edit is rejected and the running checks carry on.
+	writeFile(t, path, "checks:\n  - name: web\n    timout: 2s\n")
+	reload <- syscall.SIGHUP
+	logs.waitFor(t, "the invalid config to be rejected", func(e []logEntry) bool {
+		return count(e, "config rejected, previous config stays in effect", "") > 0
+	})
+	before := count(logs.entries(), "probe succeeded", "port")
+	logs.waitFor(t, "probes to continue after the rejection", func(e []logEntry) bool { return count(e, "probe succeeded", "port") > before })
+
+	// Shutdown reports not ready and waits for the probe in flight.
+	holding.Store(true)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no probe reached the target")
 	}
-	got := make(chan result, 1)
-	go func() {
-		status, body, err := get(t.Context(), "http://"+ln.Addr().String()+"/")
-		got <- result{status, body, err}
-	}()
-
-	<-started
 	cancel()
-	select {
-	case err := <-served:
-		t.Fatalf("serve returned while a request was in flight: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-
+	waitForStatus(t, base+"/readyz", http.StatusServiceUnavailable)
 	close(release)
-	if r := <-got; r.err != nil || r.status != http.StatusOK || r.body != "done" {
-		t.Fatalf("in-flight request = (%d, %q, %v), want (200, %q, nil)", r.status, r.body, r.err, "done")
-	}
 	select {
-	case err := <-served:
+	case err := <-done:
 		if err != nil {
-			t.Fatalf("serve returned %v, want nil", err)
+			t.Fatalf("monitor = %v, want nil", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("serve did not return after the in-flight request completed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("monitor did not return after the probe in flight finished")
+	}
+	entries := logs.entries()
+	shutdown := index(entries, "shutting down")
+	if shutdown < 0 || count(entries[shutdown:], "probe succeeded", "web") != 1 {
+		t.Errorf("the probe in flight at shutdown was not recorded after shutdown began")
+	}
+	if index(entries, "shutdown deadline reached") >= 0 {
+		t.Errorf("shutdown aborted probes, want them to finish")
+	}
+}
+
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitForStatus polls url until it returns want.
+func waitForStatus(t *testing.T, url string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, _, err := get(t.Context(), url)
+		if err == nil && status == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET %s = (%d, %v), want %d", url, status, err, want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -96,4 +195,66 @@ func get(ctx context.Context, url string) (int, string, error) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body), err
+}
+
+// logBuffer collects JSON log lines and is safe for concurrent use.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+type logEntry struct {
+	Msg   string `json:"msg"`
+	Check string `json:"check"`
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) entries() []logEntry {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var entries []logEntry
+	for line := range strings.SplitSeq(strings.TrimSpace(b.buf.String()), "\n") {
+		var e logEntry
+		if json.Unmarshal([]byte(line), &e) == nil {
+			entries = append(entries, e)
+		}
+	}
+	return entries
+}
+
+// waitFor polls the logs until done reports true.
+func (b *logBuffer) waitFor(t *testing.T, what string, done func([]logEntry) bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !done(b.entries()) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s; logs:\n%s", what, b.buf.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// count returns how many entries have msg and, if check is not empty, check.
+func count(entries []logEntry, msg, check string) int {
+	n := 0
+	for _, e := range entries {
+		if e.Msg == msg && (check == "" || e.Check == check) {
+			n++
+		}
+	}
+	return n
+}
+
+func index(entries []logEntry, msg string) int {
+	for i, e := range entries {
+		if e.Msg == msg {
+			return i
+		}
+	}
+	return -1
 }

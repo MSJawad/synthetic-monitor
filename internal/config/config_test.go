@@ -230,3 +230,9 @@ checks:
 		}
 	}
 }
+
+func TestExampleConfigIsValid(t *testing.T) {
+	if _, _, err := NewWatcher("../../examples/checks.yaml"); err != nil {
+		t.Fatalf("examples/checks.yaml: %v", err)
+	}
+}
