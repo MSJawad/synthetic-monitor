@@ -37,13 +37,13 @@ checks:
 		t.Fatal(err)
 	}
 	want := []Check{
-		{Name: "web", Interval: 30 * time.Second, Timeout: 10 * time.Second, SLO: &SLO{Target: 99.5, WindowDays: 30},
+		{Name: "web", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2, SLO: &SLO{Target: 99.5, WindowDays: 30},
 			HTTP: &HTTP{URL: "https://example.com/healthz"}},
-		{Name: "fast", Interval: 5 * time.Second, Timeout: 5 * time.Second,
+		{Name: "fast", Interval: 5 * time.Second, Timeout: 5 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 			TCP: &TCP{Address: "example.com:5432"}},
-		{Name: "resolver", Interval: 30 * time.Second, Timeout: 10 * time.Second,
+		{Name: "resolver", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 			DNS: &DNS{Host: "example.com.", Server: "1.1.1.1:53"}},
-		{Name: "cert", Interval: 30 * time.Second, Timeout: 10 * time.Second,
+		{Name: "cert", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 			TLS: &TLS{Address: "example.com:443", ServerName: "example.com", MinDaysRemaining: 14}},
 	}
 	if !reflect.DeepEqual(cfg.Checks, want) {
@@ -57,6 +57,8 @@ checks:
   - name: api
     interval: 1m
     timeout: 5s
+    failure_threshold: 5
+    success_threshold: 1
     max_latency: 800ms
     slo: {target: 99.9, window_days: 7}
     http:
@@ -78,14 +80,14 @@ checks:
 		t.Fatal(err)
 	}
 	want := []Check{
-		{Name: "api", Interval: time.Minute, Timeout: 5 * time.Second, MaxLatency: 800 * time.Millisecond,
+		{Name: "api", Interval: time.Minute, Timeout: 5 * time.Second, MaxLatency: 800 * time.Millisecond, FailureThreshold: 5, SuccessThreshold: 1,
 			SLO:  &SLO{Target: 99.9, WindowDays: 7},
 			HTTP: &HTTP{URL: "http://api.internal:8080/ready", ExpectStatus: []int{200, 204}, BodyContains: `"status":"ok"`}},
-		{Name: "ns", Interval: 30 * time.Second, Timeout: 10 * time.Second,
+		{Name: "ns", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 			DNS: &DNS{Host: "example.com", Server: "[2606:4700:4700::1111]:53", ExpectAddresses: []netip.Addr{
 				netip.MustParseAddr("93.184.215.14"), netip.MustParseAddr("2606:2800:21f:cb07:6820:80da:af6b:8b2c"),
 			}}},
-		{Name: "cert", Interval: 30 * time.Second, Timeout: 10 * time.Second,
+		{Name: "cert", Interval: 30 * time.Second, Timeout: 10 * time.Second, FailureThreshold: 3, SuccessThreshold: 2,
 			TLS: &TLS{Address: "203.0.113.10:8443", ServerName: "example.com", MinDaysRemaining: 30}},
 	}
 	if !reflect.DeepEqual(cfg.Checks, want) {
@@ -215,6 +217,16 @@ checks:
   - name: a
     slo: {target: 99, window_days: 400}
     tcp: {address: "a:1"}`, "slo.window_days 400 must be between 1 and 365"},
+		{"negative failure threshold", `
+checks:
+  - name: a
+    failure_threshold: -1
+    tcp: {address: "a:1"}`, "failure_threshold -1 must be between 1 and 100"},
+		{"success threshold too high", `
+checks:
+  - name: a
+    success_threshold: 101
+    tcp: {address: "a:1"}`, "success_threshold 101 must be between 1 and 100"},
 		{"negative min days", `
 checks:
   - name: a

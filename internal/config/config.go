@@ -24,6 +24,8 @@ const (
 	DefaultTimeout          = 10 * time.Second // capped at the check's interval
 	DefaultMinDaysRemaining = 14
 	DefaultSLOWindowDays    = 30
+	DefaultFailureThreshold = 3
+	DefaultSuccessThreshold = 2
 	MinInterval             = time.Second
 )
 
@@ -47,6 +49,12 @@ type Check struct {
 	MaxLatency time.Duration `yaml:"max_latency"`
 	// SLO, if set, is the check's availability objective.
 	SLO *SLO `yaml:"slo"`
+	// FailureThreshold is how many probes in a row must fail before an
+	// alert is sent, so a single blip does not page anyone.
+	FailureThreshold int `yaml:"failure_threshold"`
+	// SuccessThreshold is how many probes in a row must then succeed before
+	// the recovery notice, so a flapping target stays in one alert.
+	SuccessThreshold int `yaml:"success_threshold"`
 
 	HTTP *HTTP `yaml:"http"`
 	TCP  *TCP  `yaml:"tcp"`
@@ -158,6 +166,12 @@ func (c *Check) applyDefaults() {
 	if c.Timeout == 0 {
 		c.Timeout = min(DefaultTimeout, c.Interval)
 	}
+	if c.FailureThreshold == 0 {
+		c.FailureThreshold = DefaultFailureThreshold
+	}
+	if c.SuccessThreshold == 0 {
+		c.SuccessThreshold = DefaultSuccessThreshold
+	}
 	if c.SLO != nil && c.SLO.WindowDays == 0 {
 		c.SLO.WindowDays = DefaultSLOWindowDays
 	}
@@ -204,6 +218,12 @@ func (cfg *Config) validate() error {
 		}
 		if c.MaxLatency < 0 || (c.MaxLatency > 0 && c.MaxLatency >= c.Timeout) {
 			fail("max_latency %v must be less than the timeout %v", c.MaxLatency, c.Timeout)
+		}
+		if c.FailureThreshold < 1 || c.FailureThreshold > 100 {
+			fail("failure_threshold %d must be between 1 and 100", c.FailureThreshold)
+		}
+		if c.SuccessThreshold < 1 || c.SuccessThreshold > 100 {
+			fail("success_threshold %d must be between 1 and 100", c.SuccessThreshold)
 		}
 		if c.SLO != nil {
 			if c.SLO.Target <= 0 || c.SLO.Target >= 100 {
