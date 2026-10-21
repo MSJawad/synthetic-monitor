@@ -5,6 +5,9 @@ checks:
     interval: 30s
     timeout: 10s
     max_latency: 3s
+    slo:
+      target: 99.5   # percent of probes that must succeed
+      window_days: 30
     http:
       url: https://example.com/
       body_contains: Example Domain

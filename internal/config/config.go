@@ -23,6 +23,7 @@ const (
 	DefaultInterval         = 30 * time.Second
 	DefaultTimeout          = 10 * time.Second // capped at the check's interval
 	DefaultMinDaysRemaining = 14
+	DefaultSLOWindowDays    = 30
 	MinInterval             = time.Second
 )
 
@@ -44,11 +45,25 @@ type Check struct {
 	Timeout  time.Duration `yaml:"timeout"`
 	// MaxLatency, if set, fails probes that succeed but take longer.
 	MaxLatency time.Duration `yaml:"max_latency"`
+	// SLO, if set, is the check's availability objective.
+	SLO *SLO `yaml:"slo"`
 
 	HTTP *HTTP `yaml:"http"`
 	TCP  *TCP  `yaml:"tcp"`
 	DNS  *DNS  `yaml:"dns"`
 	TLS  *TLS  `yaml:"tls"`
+}
+
+// SLO is an availability objective: at least Target percent of probes
+// succeed over the trailing WindowDays days.
+type SLO struct {
+	Target     float64 `yaml:"target"`
+	WindowDays int     `yaml:"window_days"`
+}
+
+// Window returns the SLO's window as a duration.
+func (s SLO) Window() time.Duration {
+	return time.Duration(s.WindowDays) * 24 * time.Hour
 }
 
 // HTTP checks that a GET request to URL succeeds.
@@ -132,6 +147,9 @@ func (c *Check) applyDefaults() {
 	if c.Timeout == 0 {
 		c.Timeout = min(DefaultTimeout, c.Interval)
 	}
+	if c.SLO != nil && c.SLO.WindowDays == 0 {
+		c.SLO.WindowDays = DefaultSLOWindowDays
+	}
 	if c.DNS != nil && c.DNS.Server != "" {
 		if _, _, err := net.SplitHostPort(c.DNS.Server); err != nil {
 			c.DNS.Server = net.JoinHostPort(c.DNS.Server, "53")
@@ -175,6 +193,14 @@ func (cfg *Config) validate() error {
 		}
 		if c.MaxLatency < 0 || (c.MaxLatency > 0 && c.MaxLatency >= c.Timeout) {
 			fail("max_latency %v must be less than the timeout %v", c.MaxLatency, c.Timeout)
+		}
+		if c.SLO != nil {
+			if c.SLO.Target <= 0 || c.SLO.Target >= 100 {
+				fail("slo.target %v must be a percentage above 0 and below 100", c.SLO.Target)
+			}
+			if c.SLO.WindowDays < 1 || c.SLO.WindowDays > 365 {
+				fail("slo.window_days %d must be between 1 and 365", c.SLO.WindowDays)
+			}
 		}
 
 		types := 0

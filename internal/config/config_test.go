@@ -18,6 +18,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 	cfg, err := Parse([]byte(`
 checks:
   - name: web
+    slo: {target: 99.5}
     http:
       url: https://example.com/healthz
   - name: fast
@@ -36,7 +37,7 @@ checks:
 		t.Fatal(err)
 	}
 	want := []Check{
-		{Name: "web", Interval: 30 * time.Second, Timeout: 10 * time.Second,
+		{Name: "web", Interval: 30 * time.Second, Timeout: 10 * time.Second, SLO: &SLO{Target: 99.5, WindowDays: 30},
 			HTTP: &HTTP{URL: "https://example.com/healthz"}},
 		{Name: "fast", Interval: 5 * time.Second, Timeout: 5 * time.Second,
 			TCP: &TCP{Address: "example.com:5432"}},
@@ -57,6 +58,7 @@ checks:
     interval: 1m
     timeout: 5s
     max_latency: 800ms
+    slo: {target: 99.9, window_days: 7}
     http:
       url: http://api.internal:8080/ready
       expect_status: [200, 204]
@@ -77,6 +79,7 @@ checks:
 	}
 	want := []Check{
 		{Name: "api", Interval: time.Minute, Timeout: 5 * time.Second, MaxLatency: 800 * time.Millisecond,
+			SLO:  &SLO{Target: 99.9, WindowDays: 7},
 			HTTP: &HTTP{URL: "http://api.internal:8080/ready", ExpectStatus: []int{200, 204}, BodyContains: `"status":"ok"`}},
 		{Name: "ns", Interval: 30 * time.Second, Timeout: 10 * time.Second,
 			DNS: &DNS{Host: "example.com", Server: "[2606:4700:4700::1111]:53", ExpectAddresses: []netip.Addr{
@@ -197,6 +200,21 @@ checks:
 checks:
   - name: a
     dns: {server: 1.1.1.1}`, "dns.host is required"},
+		{"SLO target of 100", `
+checks:
+  - name: a
+    slo: {target: 100}
+    tcp: {address: "a:1"}`, "slo.target 100 must be a percentage above 0 and below 100"},
+		{"SLO target as a ratio", `
+checks:
+  - name: a
+    slo: {target: 0}
+    tcp: {address: "a:1"}`, "slo.target 0 must be"},
+		{"SLO window too long", `
+checks:
+  - name: a
+    slo: {target: 99, window_days: 400}
+    tcp: {address: "a:1"}`, "slo.window_days 400 must be between 1 and 365"},
 		{"negative min days", `
 checks:
   - name: a
