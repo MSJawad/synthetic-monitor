@@ -1,0 +1,87 @@
+# Prometheus and Grafana for the whole cluster. They live here because
+# observing things is this project's job; any app on the cluster joins with a
+# ServiceMonitor and a dashboard ConfigMap, the way the monitor itself does.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: prometheus-community
+  namespace: monitoring
+spec:
+  interval: 24h
+  url: https://prometheus-community.github.io/helm-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+  namespace: monitoring
+spec:
+  interval: 24h
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: 92.11.0
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+  install:
+    crds: Create
+    timeout: 15m
+  upgrade:
+    # Helm installs CRDs but never updates them; a chart upgrade often
+    # brings new fields the operator relies on.
+    crds: CreateReplace
+    timeout: 15m
+  values:
+    # The monitor sends its own alerts, so nothing here needs Alertmanager.
+    alertmanager:
+      enabled: false
+    # k3s runs these inside its own process, with no endpoints to scrape;
+    # leaving them on would show permanently missing targets.
+    kubeControllerManager:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeProxy:
+      enabled: false
+    kubeEtcd:
+      enabled: false
+    prometheus:
+      prometheusSpec:
+        # Monitors and rules from every namespace and release, not only
+        # those labelled with this release's name.
+        serviceMonitorSelectorNilUsesHelmValues: false
+        podMonitorSelectorNilUsesHelmValues: false
+        probeSelectorNilUsesHelmValues: false
+        ruleSelectorNilUsesHelmValues: false
+        scrapeConfigSelectorNilUsesHelmValues: false
+        retention: 15d
+        # Below the volume's size: local-path volumes don't enforce one.
+        retentionSize: 8GB
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              accessModes: [ReadWriteOnce]
+              resources:
+                requests:
+                  storage: 10Gi
+        resources:
+          requests: {cpu: 100m, memory: 512Mi}
+          limits: {memory: 1536Mi}
+    grafana:
+      # Private: reached with kubectl port-forward through the SSH tunnel.
+      # The admin password is generated on install and kept in the
+      # kube-prometheus-stack-grafana Secret.
+      ingress:
+        enabled: false
+      sidecar:
+        dashboards:
+          searchNamespace: ALL
+      resources:
+        requests: {cpu: 50m, memory: 192Mi}
+        limits: {memory: 512Mi}
