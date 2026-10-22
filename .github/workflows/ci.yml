@@ -64,13 +64,23 @@ jobs:
       - name: Lint the Helm chart
         run: helm lint --strict charts/synthetic-monitor --set image.tag=ci
       # Renders every template, with the example checks as values and the
-      # optional resources on, and checks the dashboard is valid JSON.
+      # optional resources on, and checks the dashboard is valid JSON. The
+      # chart is versioned the way Flux versions a chart it pulls from a
+      # registry, with the digest as build metadata, and every label value is
+      # checked against the rule the API server enforces.
       - name: Render the Helm chart
         run: |
-          helm template synthetic-monitor charts/synthetic-monitor -f examples/checks.yaml \
+          helm package charts/synthetic-monitor --version 0.1.0+0123456789ab --destination "$RUNNER_TEMP"
+          helm template synthetic-monitor "$RUNNER_TEMP/synthetic-monitor-0.1.0+0123456789ab.tgz" -f examples/checks.yaml \
             --set image.tag=ci --set serviceMonitor.enabled=true --set grafanaDashboard.enabled=true \
-            --set ingress.enabled=true --set ingress.host=status.example.com --set ingress.tls.secretName=status-tls > /dev/null
+            --set ingress.enabled=true --set ingress.host=status.example.com --set ingress.tls.secretName=status-tls \
+            > "$RUNNER_TEMP/rendered.yaml"
           jq empty charts/synthetic-monitor/dashboards/synthetic-monitor.json
+          yq -N '.. | select(tag == "!!map") | select(has("labels")) | .labels[]' "$RUNNER_TEMP/rendered.yaml" > "$RUNNER_TEMP/labels.txt"
+          if grep -vxE '([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?' "$RUNNER_TEMP/labels.txt"; then
+            echo "::error::The API server rejects the label values above."
+            exit 1
+          fi
       # The values Flux deploys, checked against the chart's schema; the Go
       # tests check the checks among them.
       - name: Render the Helm chart with the production values
