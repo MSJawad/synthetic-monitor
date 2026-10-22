@@ -31,6 +31,10 @@ import (
 	"github.com/MSJawad/synthetic-monitor/internal/web"
 )
 
+// version identifies the build. The image build sets it to the commit with
+// -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	err := run(context.Background(), os.Args[1:], os.Stdout)
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
@@ -244,12 +248,13 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 		sched.Apply(cfg.Checks)
 		m.ConfigLoaded(true)
 	}
-	logger.Info("config loaded", "version", cfg.Version, "checks", len(cfg.Checks))
+	logger.Info("config loaded", "config_version", cfg.Version, "checks", len(cfg.Checks))
 	apply(cfg)
 
 	var slos atomic.Pointer[map[string]slo.Status]
 	slos.Store(&map[string]slo.Status{})
 	status := web.Handler(web.Source{
+		Version:  version,
 		Checks:   func() []config.Check { return current.Load().Checks },
 		Recent:   s.history.Recent,
 		SLOs:     func() map[string]slo.Status { return *slos.Load() },
@@ -277,7 +282,7 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
-	logger.Info("http server listening", "addr", ln.Addr().String())
+	logger.Info("http server listening", "addr", ln.Addr().String(), "version", version)
 
 	// Background work that must stop before the scheduler and history do.
 	bgCtx, stopBackground := context.WithCancel(ctx)
@@ -293,7 +298,7 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 					reject(err)
 					return
 				}
-				logger.Info("config reloaded", "version", cfg.Version, "checks", len(cfg.Checks))
+				logger.Info("config reloaded", "config_version", cfg.Version, "checks", len(cfg.Checks))
 				apply(cfg)
 			}, reject)
 	})

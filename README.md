@@ -86,7 +86,7 @@ exits.
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | status page |
-| `GET /api/status` | the status page's data as JSON |
+| `GET /api/status` | the status page's data as JSON, with the running build's `version` (its commit) |
 | `GET /metrics` | Prometheus metrics |
 | `GET /healthz` | liveness: the process is up |
 | `GET /readyz` | readiness: `503` once shutdown has started |

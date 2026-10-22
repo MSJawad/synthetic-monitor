@@ -175,8 +175,9 @@ func TestMonitor(t *testing.T) {
 		t.Errorf("GET / = %d, %v; want the status page naming web but not its URL", status, err)
 	}
 	status, body, err := get(t.Context(), base+"/api/status")
-	if err != nil || status != http.StatusOK || !strings.Contains(body, `"name":"web","type":"http","state":"up"`) {
-		t.Errorf("GET /api/status = %d %s, %v; want web up", status, body, err)
+	if err != nil || status != http.StatusOK || !strings.Contains(body, `"version":"dev"`) ||
+		!strings.Contains(body, `"name":"web","type":"http","state":"up"`) {
+		t.Errorf("GET /api/status = %d %s, %v; want version dev and web up", status, body, err)
 	}
 
 	// SIGHUP applies an edited config without a restart.

@@ -246,6 +246,7 @@ func fakeSource() Source {
 		"cache":         {sample(time.Second, true)},
 	}
 	return Source{
+		Version: "4b825dc",
 		Checks: func() []config.Check {
 			return []config.Check{withSLO, {Name: "cache", TCP: &config.TCP{Address: "10.0.0.7:6379"}}, httpCheck("broken")}
 		},
@@ -319,6 +320,9 @@ func TestAPI(t *testing.T) {
 	}
 	if got.Status != stateDown || len(got.Checks) != 3 {
 		t.Fatalf("status %q with %d checks, want down with 3", got.Status, len(got.Checks))
+	}
+	if got.Version != "4b825dc" {
+		t.Errorf("version = %q, want the source's", got.Version)
 	}
 	api := got.Checks[0]
 	if api.State != stateDown || api.LastProbe == nil || api.LastProbe.OK || api.LastProbe.Reason != probe.ReasonTimeout ||

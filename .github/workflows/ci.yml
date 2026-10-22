@@ -90,6 +90,7 @@ jobs:
         run: >-
           docker buildx build .
           --platform linux/arm64,linux/amd64
+          --build-arg VERSION="$GITHUB_SHA"
           --tag "$IMAGE:$GITHUB_SHA"
           --output type=image,push=$PUSH
       - name: Check the registry has both platforms

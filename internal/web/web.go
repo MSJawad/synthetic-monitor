@@ -49,6 +49,9 @@ var (
 
 // Source supplies what the status page shows.
 type Source struct {
+	// Version identifies the running build, reported by /api/status so a
+	// deploy can be confirmed from outside.
+	Version string
 	// Checks returns the configured checks, in config order.
 	Checks func() []config.Check
 	// Recent returns a check's last n probe results, oldest first.
@@ -107,6 +110,7 @@ func (h *handler) page(w http.ResponseWriter, r *http.Request) {
 
 // apiStatus is the JSON form of the status page.
 type apiStatus struct {
+	Version   string     `json:"version"`
 	Status    state      `json:"status"`
 	Generated time.Time  `json:"generated"`
 	Checks    []apiCheck `json:"checks"`
@@ -142,7 +146,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	inputs := h.inputs(r.Context())
 	now := h.now()
 	v := buildPage(inputs, now)
-	out := apiStatus{Status: v.State, Generated: now.UTC(), Checks: []apiCheck{}}
+	out := apiStatus{Version: h.src.Version, Status: v.State, Generated: now.UTC(), Checks: []apiCheck{}}
 	for i, in := range inputs {
 		c := apiCheck{Name: in.check.Name, Type: in.check.Type(), State: v.Checks[i].State,
 			FailingSince: in.firingSince.UTC(), LastPing: in.lastPing.UTC()}

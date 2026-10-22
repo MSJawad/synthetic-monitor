@@ -5,6 +5,9 @@
 FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build
 ARG TARGETOS
 ARG TARGETARCH
+# The commit being built, reported by /api/status. CI passes it; .git is not
+# in the build context, so Go cannot stamp it itself.
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
@@ -15,7 +18,7 @@ COPY internal ./internal
 # profiles still name functions.
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/synthetic-monitor ./cmd/synthetic-monitor \
+    go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/synthetic-monitor ./cmd/synthetic-monitor \
     && mkdir /out/data
 
 # distroless/static has no shell or package manager, only CA certificates
