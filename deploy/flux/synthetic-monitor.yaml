@@ -83,6 +83,13 @@ spec:
           address: 92-5-186-10.sslip.io:443
           min_days_remaining: 14
 
+      # The status page's own certificate, issued and renewed separately.
+      - name: status-cert
+        interval: 1h
+        tls:
+          address: status.92-5-186-10.sslip.io:443
+          min_days_remaining: 14
+
       # sslip.io is a free third-party service the site's name depends on.
       # When it fails, this says why the site is unreachable.
       - name: sslip-dns
