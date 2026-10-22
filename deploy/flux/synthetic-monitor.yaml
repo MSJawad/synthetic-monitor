@@ -56,7 +56,7 @@ spec:
       # The server's public IP with dashes, resolved by sslip.io.
       host: status.92-5-186-10.sslip.io
       annotations:
-        cert-manager.io/cluster-issuer: letsencrypt-staging
+        cert-manager.io/cluster-issuer: letsencrypt
       tls:
         secretName: synthetic-monitor-tls
     # Edits here reach the running pod without a restart.
