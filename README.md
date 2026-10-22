@@ -28,6 +28,45 @@ On a phone, with a check's recent probes expanded:
 The screenshots show demo checks against a local target made to fail on
 purpose. The page follows the viewer's light or dark preference.
 
+## How it works
+
+```mermaid
+flowchart TB
+  config(["checks file"]) -- "polled, or SIGHUP" --> scheduler["scheduler<br/>a goroutine per check"]
+  scheduler --> probes["probes"] --> targets(["targets"])
+  jobs(["scheduled jobs"]) -- "POST /heartbeat/{check}" --> db
+  scheduler -- results --> metrics["/metrics"]
+  scheduler -- results --> db[("SQLite<br/>results, alert state,<br/>outbox, pings")]
+  scheduler -- results --> alerts["alert manager<br/>a state machine per check"]
+  alerts -- "state and notification,<br/>one transaction" --> db
+  alerts -- "outbox, retried" --> ntfy(["ntfy"])
+  db --> slo["SLO evaluator"]
+  slo --> metrics
+  metrics --> prom(["Prometheus, Grafana"])
+  db --> web["status page, /api/status"]
+  slo --> web
+  web --> visitors(["visitors"])
+  watchdog["watchdog"] -- every minute --> hc(["healthchecks.io"])
+  hc -. if the pings stop .-> ntfy
+```
+
+One process does everything:
+
+- **Scheduler:** runs each check on its own goroutine, and hands every
+  result to three places at once: Prometheus metrics, the SQLite history,
+  and the alert manager.
+- **Alert manager:** a state machine per check decides when failures in a
+  row become an alert, and successes in a row a recovery. Each alert is
+  saved together with its notification, and a separate loop delivers saved
+  notifications to ntfy until they are accepted.
+- **SLO evaluator:** recomputes availability and error budgets from the
+  history every 30 seconds, for the status page and as metrics.
+- **Heartbeats:** jobs that can't be probed ping the monitor instead.
+- **Watchdog:** pings an outside service every minute, which alerts if the
+  monitor itself goes quiet.
+
+[Decisions](#decisions) explains each choice.
+
 ## Checks
 
 Each check in the checks file has a name, an interval and one type:
