@@ -130,9 +130,12 @@ Failure reasons: `timeout`, `dns`, `connect`, `tls`, `cert_expiry`,
 ## Deploying
 
 CI builds an image for arm64 and amd64 from every commit on `main` and pushes
-it to `ghcr.io/msjawad/synthetic-monitor`, tagged with the commit SHA. The
-Helm chart in [`charts/synthetic-monitor`](charts/synthetic-monitor) runs it
-as a single pod, with the history on a persistent volume.
+it to `ghcr.io/msjawad/synthetic-monitor`, tagged with the commit SHA. It then
+publishes the Helm chart in [`charts/synthetic-monitor`](charts/synthetic-monitor)
+to `oci://ghcr.io/msjawad/charts/synthetic-monitor` as version
+`0.1.<run number>`, with that commit as its appVersion, so each chart version
+runs the image built with it. The chart runs the monitor as a single pod, with
+the history on a persistent volume.
 
 ```sh
 kubectl create namespace synthmon
@@ -143,9 +146,12 @@ kubectl -n synthmon create secret generic synthetic-monitor \
   --from-literal=NTFY_URL=https://ntfy.sh/<long-random-topic> \
   --from-literal=HEARTBEAT_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=WATCHDOG_URL=https://hc-ping.com/<uuid>
-helm install synthetic-monitor charts/synthetic-monitor -n synthmon \
-  --set image.tag=<commit SHA> --set existingSecret=synthetic-monitor -f examples/checks.yaml
+helm install synthetic-monitor oci://ghcr.io/msjawad/charts/synthetic-monitor -n synthmon \
+  --version <chart version> --set existingSecret=synthetic-monitor -f examples/checks.yaml
 ```
+
+From a checkout, `charts/synthetic-monitor` works the same with
+`--set image.tag=<commit SHA>`, since it has no appVersion to default to.
 
 A checks file is also a values file: both keep the checks under `checks:`.
 To change the checks, run `helm upgrade` with the edited file; the pod
@@ -153,9 +159,10 @@ applies them within about a minute, without restarting. Every setting is
 described in [`values.yaml`](charts/synthetic-monitor/values.yaml), and
 misspelled ones are rejected.
 
-- **Private image:** while the GHCR package is private, the cluster needs a
-  pull secret: a `docker-registry` Secret holding a token that can read
-  packages, passed as `--set imagePullSecrets[0].name=<secret>`.
+- **Private image:** while the GHCR packages are private, `helm registry login
+  ghcr.io` with a token that can read packages lets Helm fetch the chart, and
+  the cluster needs a pull secret: a `docker-registry` Secret holding such a
+  token, passed as `--set imagePullSecrets[0].name=<secret>`.
 - **Public address:** `--set ingress.enabled=true --set ingress.host=<host>`
   exposes the status page and the heartbeat endpoint, with the certificate's
   issuer set through `ingress.annotations` and `ingress.tls.secretName`.
@@ -629,16 +636,30 @@ in the same spirit as the strict checks file. The checks themselves are left
 to the monitor to validate, so there is one set of rules, not two that could
 disagree.
 
-### Images built per commit, with plain docker commands
+### Images and charts built per commit, with plain commands
 
 CI publishes an image for every commit on `main`, tagged with the commit SHA
 and never `latest`: a tag that always means the same image makes a
 deployment reproducible and a rollback a matter of naming the previous SHA.
-The workflow calls `docker buildx` directly instead of using the
-docker/*-action wrappers, which keeps third-party code away from the job
-that holds a token able to push packages; its BuildKit image is pinned by
-digest. After pushing, the job reads the image back from the registry and
+The workflow calls `docker buildx` and `helm` directly instead of using
+wrapper actions, which keeps third-party code away from the job that holds a
+token able to push packages; the BuildKit image is pinned by digest, and
+Helm is downloaded at a pinned version and checked against its published
+hash. After pushing, the job reads the image back from the registry and
 checks that it holds both platforms.
+
+The chart is published from the same run, after the image, as version
+`0.1.<run number>` with the commit as its appVersion, which the image tag
+defaults to. A commit can't contain its own SHA, so the tag to deploy can't
+be written into git by hand; stamping it into the chart at build time gives
+each chart version exactly one image, and gives a deployment tool such as
+Flux a rising version to follow.
+
+CI holds no cluster credentials: whatever deploys the chart pulls it from
+inside the cluster. CI's last job instead waits up to 15 minutes for the
+public status page to report the new commit in `/api/status`, so a rollout
+that fails, or is rolled back, fails the run. It runs once the `STATUS_URL`
+repository variable names a deployment.
 
 ### The dashboard: one chart per check, states as the status page names them
 

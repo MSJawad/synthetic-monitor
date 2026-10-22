@@ -12,6 +12,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Helm is downloaded at the version used locally and checked against its
+  # published hash, rather than taken from whatever the runner image ships.
+  HELM_VERSION: v4.3.1
+  HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+
 # Actions are pinned to commit SHAs because tags can be moved to point at
 # different code; the comment records the version each SHA belongs to.
 jobs:
@@ -48,6 +54,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install Helm
+        run: |
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$RUNNER_TEMP/helm.tar.gz" "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  $RUNNER_TEMP/helm.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/helm.tar.gz" -C "$RUNNER_TEMP/bin" --strip-components=1 linux-amd64/helm
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Lint the Helm chart
         run: helm lint --strict charts/synthetic-monitor --set image.tag=ci
       # Renders every template, with the example checks as values and the
@@ -81,6 +94,13 @@ jobs:
         run: >-
           docker buildx create --use --driver docker-container
           --driver-opt image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - name: Install Helm
+        run: |
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$RUNNER_TEMP/helm.tar.gz" "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  $RUNNER_TEMP/helm.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/helm.tar.gz" -C "$RUNNER_TEMP/bin" --strip-components=1 linux-amd64/helm
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Log in to GHCR
         if: env.PUSH == 'true'
         run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
@@ -102,3 +122,55 @@ jobs:
             | jq -r '[.manifests[].platform | select(.os != "unknown") | "\(.os)/\(.architecture)"] | sort | join(",")')
           echo "Published platforms: $platforms"
           test "$platforms" = "linux/amd64,linux/arm64"
+      - name: Package the Helm chart
+        # Version 0.1.<run number> rises with every run, and Flux deploys the
+        # highest. The commit, as appVersion, is the tag of the image the
+        # chart runs; the render checks that it is.
+        run: |
+          helm package charts/synthetic-monitor --version "0.1.$GITHUB_RUN_NUMBER" --app-version "$GITHUB_SHA" --destination "$RUNNER_TEMP"
+          helm template synthetic-monitor "$RUNNER_TEMP/synthetic-monitor-0.1.$GITHUB_RUN_NUMBER.tgz" -f examples/checks.yaml \
+            | grep -qF "image: \"$IMAGE:$GITHUB_SHA\""
+      - name: Publish the Helm chart
+        # After the image, so a published chart never names an image that
+        # is not in the registry yet.
+        if: env.PUSH == 'true'
+        run: |
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm push "$RUNNER_TEMP/synthetic-monitor-0.1.$GITHUB_RUN_NUMBER.tgz" oci://ghcr.io/msjawad/charts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    # Flux deploys from inside the cluster, so CI holds no cluster
+    # credentials. This job waits until the public status page reports this
+    # commit, so a rollout that fails, and is rolled back, fails CI with a
+    # clear message. It runs once the STATUS_URL repository variable names
+    # a deployment to wait for.
+    needs: [image]
+    if: github.event_name == 'push' && vars.STATUS_URL != ''
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Wait for the status page to report this commit
+        env:
+          STATUS_URL: ${{ vars.STATUS_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          deadline=$((SECONDS + 900))
+          while :; do
+            live=$(curl -sf --max-time 10 "$STATUS_URL/api/status" | jq -r .version || true)
+            if [ "$live" = "$GITHUB_SHA" ]; then
+              echo "Live: $live"
+              exit 0
+            fi
+            # A newer commit may be live already; it includes this one.
+            if [[ $live =~ ^[0-9a-f]{40}$ ]] &&
+              [ "$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$live" --jq .status 2>/dev/null)" = ahead ]; then
+              echo "A newer commit is live: $live"
+              exit 0
+            fi
+            if [ $SECONDS -ge $deadline ]; then
+              echo "::error::After 15 minutes $STATUS_URL reports ${live:-nothing}, not $GITHUB_SHA. The rollout failed or is stuck: run 'flux get helmreleases -A' and check the pod."
+              exit 1
+            fi
+            sleep 15
+          done
