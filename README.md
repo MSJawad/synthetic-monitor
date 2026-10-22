@@ -31,6 +31,11 @@ purpose. The page follows the viewer's light or dark preference.
 ## How it works
 
 ```mermaid
+---
+config:
+  flowchart:
+    useMaxWidth: false
+---
 flowchart TB
   watchdog["watchdog"]
   scheduler["scheduler"] --> probes["probes"] --> targets(["targets"])
