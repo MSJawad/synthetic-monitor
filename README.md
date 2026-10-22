@@ -358,6 +358,43 @@ At a 30-second interval, 2,000 probes a second would be 60,000 checks, and
   normal weight the results were clean, and production stayed within its
   usual latency.
 
+## Limits, and what v2 would add
+
+v1 is one process watching from one place. These are the gaps that leaves,
+and what a v2 would do about each.
+
+- **It watches from one place.** In production the monitor runs on the same
+  node as the site it watches. It can't tell "down for everyone" from
+  "unreachable from here". Its probes start inside the site's own cloud
+  network, not out on the internet with the visitors. Losing the node takes
+  out the site and the monitor together, which only the dead man's switch
+  notices. A v2 would run a second instance in another region or cloud, and
+  alert only when both agree.
+- **Alerts need failures in a row.** A target failing two probes in every
+  three never alerts; only its error budget shows it. A v2 would also alert
+  on how fast the budget is burning, over a short and a long window (the
+  multiwindow burn-rate alerts from Google's SRE workbook). That catches a
+  hard outage within minutes and a slow leak within hours.
+- **Probes sample.** An outage shorter than a check's interval can fall
+  between two probes. That is the nature of synthetic monitoring, not
+  something a v2 would fix: the apps' own request metrics in Prometheus see
+  every request, and cover what probes miss.
+- **One channel, and no way to silence it.** Every alert goes to one ntfy
+  topic, with no routing, escalation or acknowledgement. Planned work pages
+  like an outage: the production drills sent real alerts. A v2 would add
+  maintenance windows, which keep probing and recording but hold back
+  notifications, and a generic webhook, so alerts can go anywhere that
+  accepts JSON.
+- **History lives on one disk.** The SQLite file sits on the node's local
+  volume, so losing the node loses the history, the SLO record and any
+  undelivered notifications. A v2 would stream it to object storage with
+  Litestream, which copies SQLite's write-ahead log continuously, and
+  restore it on start.
+- **Checks speak HTTP, not JavaScript.** A page whose API answers but whose
+  front end fails to render passes every check. A v2 could add a browser
+  check type in a separate worker, since a headless browser costs orders of
+  magnitude more per probe than an HTTP request.
+
 ## Development
 
 Requires Go 1.27.3 or later.
