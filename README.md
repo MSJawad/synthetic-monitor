@@ -344,13 +344,13 @@ At a 30-second interval, 2,000 probes a second would be 60,000 checks, and
   more than its X25519 half.
 - **On a big machine, local ports can run out before CPU.** Whichever side
   closes a connection first holds its port in TIME_WAIT for 30 to 60
-  seconds. On macOS, whose
-  16,384 ephemeral ports are shared by the whole machine, HTTP probes failed
-  at 12,000 a second with three quarters of the CPU idle. Linux only needs a
-  port to be unique per destination, so in production, probing many hosts at
-  30-second intervals, the limit is far away. Probes still close
-  gracefully rather than with a reset that would avoid TIME_WAIT: a monitor
-  should not fill its targets' logs with connection resets.
+  seconds. On macOS, whose 16,384 ephemeral ports are shared by the whole
+  machine, HTTP probes failed at 12,000 a second with three quarters of the
+  CPU idle. Linux only needs a port to be unique per destination, so in
+  production, probing many hosts at 30-second intervals, the limit is far
+  away. Probes still close gracefully rather than with a reset that would
+  avoid TIME_WAIT: a monitor should not fill its targets' logs with
+  connection resets.
 - **Benchmark beside production at normal priority.** The first run on the
   production node used the lowest CPU weight, to keep out of production's
   way. That starved the benchmark's own test server whenever production
@@ -530,11 +530,12 @@ Each check's first probe comes at a random point within its interval, so
 checks that share an interval do not all fire together after a start or
 reload. The spread is capped at one minute: spreading an hourly check's
 first probe over a whole hour would leave it without data for up to an hour
-after every deploy. After that it keeps a fixed cadence: the next run is one interval after the
-previous run was *scheduled*, not after it finished, so probe duration does
-not make checks drift into alignment. A run that overruns its next slot (by
-waiting for a free slot under the concurrency limit) skips the missed slots
-instead of firing back to back, and a check never has two probes in flight.
+after every deploy. After that it keeps a fixed cadence: the next run is
+one interval after the previous run was *scheduled*, not after it finished,
+so probe duration does not make checks drift into alignment. A run that
+overruns its next slot (by waiting for a free slot under the concurrency
+limit) skips the missed slots instead of firing back to back, and a check
+never has two probes in flight.
 
 ### Two kinds of stop: stop scheduling, and abort
 
@@ -739,10 +740,11 @@ to the pure-Go SQLite driver.
 The runtime image is `distroless/static`: the binary, CA certificates (which
 HTTPS and TLS probes need), timezone data and a non-root user, and no shell
 or package manager. It is about 18 MB, 7 MB compressed, and there is little
-in it for a vulnerability scanner to flag or an attacker to use. The user is set as a
-number (`65532`), because Kubernetes can only enforce `runAsNonRoot` when it
-can see the UID without reading the image's `/etc/passwd`. Base images are
-pinned by digest, for the same reason actions are pinned to SHAs.
+in it for a vulnerability scanner to flag or an attacker to use. The user is
+set as a number (`65532`), because Kubernetes can only enforce
+`runAsNonRoot` when it can see the UID without reading the image's
+`/etc/passwd`. Base images are pinned by digest, for the same reason
+actions are pinned to SHAs.
 
 ### One pod, replaced rather than rolled
 
