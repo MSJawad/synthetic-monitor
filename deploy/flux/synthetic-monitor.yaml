@@ -1,10 +1,9 @@
 # The monitor. CI publishes each build on main as chart version 0.1.<run
 # number>; Flux checks the registry every minute and upgrades to the highest.
 #
-# Two Secrets in this namespace are created by hand, never committed:
-# ghcr (a docker-registry Secret that can read the private packages) and
-# synthetic-monitor (NTFY_URL, HEARTBEAT_TOKEN and WATCHDOG_URL). The README's
-# production section has the commands.
+# One Secret in this namespace is created by hand, never committed:
+# synthetic-monitor, holding NTFY_URL, HEARTBEAT_TOKEN and WATCHDOG_URL. The
+# README's production section has the command.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -18,8 +17,6 @@ metadata:
 spec:
   interval: 1m
   url: oci://ghcr.io/msjawad/charts/synthetic-monitor
-  secretRef:
-    name: ghcr
   ref:
     semver: ">=0.1.0"
   layerSelector:
@@ -49,8 +46,6 @@ spec:
       strategy: rollback
   values:
     existingSecret: synthetic-monitor
-    imagePullSecrets:
-      - name: ghcr
     serviceMonitor:
       enabled: true
     grafanaDashboard:

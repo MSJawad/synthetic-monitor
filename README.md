@@ -159,10 +159,10 @@ applies them within about a minute, without restarting. Every setting is
 described in [`values.yaml`](charts/synthetic-monitor/values.yaml), and
 misspelled ones are rejected.
 
-- **Private image:** while the GHCR packages are private, `helm registry login
-  ghcr.io` with a token that can read packages lets Helm fetch the chart, and
-  the cluster needs a pull secret: a `docker-registry` Secret holding such a
-  token, passed as `--set imagePullSecrets[0].name=<secret>`.
+- **Private registry:** the packages above are public. For a private copy,
+  `helm registry login` with a token that can read it lets Helm fetch the
+  chart, and the cluster needs a pull secret: a `docker-registry` Secret
+  holding such a token, passed as `--set imagePullSecrets[0].name=<secret>`.
 - **Public address:** `--set ingress.enabled=true --set ingress.host=<host>`
   exposes the status page and the heartbeat endpoint, with the certificate's
   issuer set through `ingress.annotations` and `ingress.tls.secretName`.
