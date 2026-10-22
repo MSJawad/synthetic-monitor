@@ -54,10 +54,11 @@ func loadWarmup() time.Duration {
 // TestLoad measures how many checks one instance sustains. It wires the
 // service's pipeline (scheduler, real probes, metrics, SQLite history and
 // alerting) and runs N checks, each probing every second against a server
-// in the same process, stepping N up. A level is sustained if at least 99%
-// of the scheduled probes ran, none failed, and p99 scheduler lag stayed
-// under 100ms. CPU figures include the target server's share. All probes
-// go to one destination, the worst case for local port usage.
+// in the same process, stepping N up until a level is not sustained. A
+// level is sustained if at least 99% of the scheduled probes ran, none
+// failed, and p99 scheduler lag stayed under 100ms. CPU figures include the
+// target server's share. All probes go to one destination, the worst case
+// for local port usage.
 //
 //	go test -run TestLoad -v -timeout 30m ./cmd/synthetic-monitor -args -load
 func TestLoad(t *testing.T) {
@@ -79,6 +80,10 @@ func TestLoad(t *testing.T) {
 		for _, n := range l.checks {
 			r := runLoad(t, l.kind, n, cert, pool)
 			t.Log(r.row())
+			// Higher levels would only overload the machine further.
+			if !r.sustained() {
+				break
+			}
 		}
 	}
 }
@@ -95,9 +100,13 @@ type loadResult struct {
 	lastFailureReason probe.Reason
 }
 
+func (r loadResult) ranPct() float64 { return 100 * float64(r.ran) / float64(r.expected) }
+
+func (r loadResult) sustained() bool {
+	return r.ranPct() >= 99 && r.failed == 0 && r.lagP99 < 100*time.Millisecond
+}
+
 func (r loadResult) row() string {
-	ranPct := 100 * float64(r.ran) / float64(r.expected)
-	sustained := ranPct >= 99 && r.failed == 0 && r.lagP99 < 100*time.Millisecond
 	perProbe := time.Duration(0)
 	if r.ran > 0 {
 		perProbe = r.cpu / time.Duration(r.ran)
@@ -107,9 +116,9 @@ func (r loadResult) row() string {
 		failed += " (" + string(r.lastFailureReason) + ")"
 	}
 	return fmt.Sprintf("| %s | %d | %.0f | %.1f%% | %s | %d | %v | %v | %.2f | %v | %.0f MB | %v |",
-		r.kind, r.checks, float64(r.ran)/loadWindow.Seconds(), ranPct, failed, r.skipped,
+		r.kind, r.checks, float64(r.ran)/loadWindow.Seconds(), r.ranPct(), failed, r.skipped,
 		r.lagP50.Round(10*time.Microsecond), r.lagP99.Round(10*time.Microsecond),
-		r.cpu.Seconds()/loadWindow.Seconds(), perProbe.Round(time.Microsecond), r.heapMB, map[bool]string{true: "yes", false: "no"}[sustained])
+		r.cpu.Seconds()/loadWindow.Seconds(), perProbe.Round(time.Microsecond), r.heapMB, map[bool]string{true: "yes", false: "no"}[r.sustained()])
 }
 
 func runLoad(t *testing.T, kind string, n int, cert tls.Certificate, pool *x509.CertPool) loadResult {
