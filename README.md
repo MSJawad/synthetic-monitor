@@ -32,29 +32,27 @@ purpose. The page follows the viewer's light or dark preference.
 
 ```mermaid
 flowchart TB
-  config(["checks file"]) -- "polled, or SIGHUP" --> scheduler["scheduler<br/>a goroutine per check"]
-  scheduler --> probes["probes"] --> targets(["targets"])
-  jobs(["scheduled jobs"]) -- "POST /heartbeat/{check}" --> db
-  scheduler -- results --> metrics["/metrics"]
-  scheduler -- results --> db[("SQLite<br/>results, alert state,<br/>outbox, pings")]
-  scheduler -- results --> alerts["alert manager<br/>a state machine per check"]
-  alerts -- "state and notification,<br/>one transaction" --> db
-  alerts -- "outbox, retried" --> ntfy(["ntfy"])
+  watchdog["watchdog"]
+  scheduler["scheduler"] --> probes["probes"] --> targets(["targets"])
+  jobs(["scheduled jobs"]) -- heartbeats --> db
+  scheduler --> db[("SQLite")]
+  scheduler --> alerts["alert manager"]
+  scheduler --> metrics["/metrics"]
+  alerts -- "state and outbox,<br/>one transaction" --> db
+  alerts -- notifications --> ntfy(["ntfy"])
+  db --> web["status page"]
   db --> slo["SLO evaluator"]
-  slo --> metrics
-  metrics --> prom(["Prometheus, Grafana"])
-  db --> web["status page, /api/status"]
   slo --> web
-  web --> visitors(["visitors"])
-  watchdog["watchdog"] -- every minute --> hc(["healthchecks.io"])
-  hc -. if the pings stop .-> ntfy
+  slo --> metrics
+  watchdog --> hc(["healthchecks.io"]) -. "if the pings stop" .-> ntfy
 ```
 
 One process does everything:
 
-- **Scheduler:** runs each check on its own goroutine, and hands every
-  result to three places at once: Prometheus metrics, the SQLite history,
-  and the alert manager.
+- **Scheduler:** runs each check in the checks file on its own goroutine,
+  and applies edits to the file without a restart. It hands every result to
+  three places at once: Prometheus metrics, the SQLite history, and the
+  alert manager.
 - **Alert manager:** a state machine per check decides when failures in a
   row become an alert, and successes in a row a recovery. Each alert is
   saved together with its notification, and a separate loop delivers saved
