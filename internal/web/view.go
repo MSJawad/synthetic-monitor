@@ -79,7 +79,7 @@ type checkView struct {
 }
 
 type sloView struct {
-	Window       string // "30 days"
+	Label        string // "Availability, last 30 days", or "since" while history is shorter
 	Availability string // "99.95%"
 	Target       string // "99.5%"
 	Budget       string // "72% of error budget left"
@@ -133,7 +133,7 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 	v = checkView{Name: in.check.Name, Type: strings.ToUpper(in.check.Type()), State: statePending}
 	defer func() { v.Label = v.State.label() }()
 	if in.slo != nil && in.check.SLO != nil {
-		v.SLO = buildSLO(*in.slo, *in.check.SLO)
+		v.SLO = buildSLO(*in.slo, *in.check.SLO, now)
 	}
 	if in.unavailable {
 		v.Checked = "History unavailable"
@@ -195,11 +195,16 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 	return v
 }
 
-func buildSLO(s slo.Status, c config.SLO) *sloView {
+func buildSLO(s slo.Status, c config.SLO, now time.Time) *sloView {
 	v := &sloView{
-		Window:       plural(c.WindowDays, "day", "days"),
+		Label:        "Availability, last " + plural(c.WindowDays, "day", "days"),
 		Availability: percent(s.Availability),
 		Target:       strconv.FormatFloat(c.Target, 'f', -1, 64) + "%",
+	}
+	// Until the history covers the window, the figures cover less, and
+	// the label says how much.
+	if s.Partial {
+		v.Label = "Availability since " + clock(s.Since, now)
 	}
 	// The epsilon keeps binary rounding from showing a used-up budget as
 	// "0% left".

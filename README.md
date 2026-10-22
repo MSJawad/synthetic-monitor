@@ -542,6 +542,15 @@ is one equal sample. Time when the monitor itself was down produces no probes,
 so it counts neither for nor against a check; the monitor cannot know what
 happened while it was not looking.
 
+Until a check's history reaches back a whole window, the figures cover only
+the time since its first probe. The status page labels them that way
+("Availability since 13:05:12 UTC"), and `/api/status` gives `since`. So a
+new check's first incident weighs heavily: in production, a 3-minute drill
+an hour after deployment read as 85% availability. That is what was
+measured. Labelling the period honestly is better than assuming the
+unmeasured part of the window went well, and the figure settles as history
+builds.
+
 The service computes SLOs from its own history every 30 seconds and exports
 the results as gauges, rather than leaving Grafana to compute them from
 counters with PromQL. A 30-day `increase()` needs Prometheus to retain 30 days

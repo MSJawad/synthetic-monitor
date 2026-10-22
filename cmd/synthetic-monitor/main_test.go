@@ -242,7 +242,7 @@ func TestMonitor(t *testing.T) {
 	}
 	defer history.Close(context.Background())
 	for _, check := range []string{"web", "port"} {
-		total, _, err := history.Counts(t.Context(), check, time.Now().Add(-time.Hour))
+		total, _, _, err := history.Counts(t.Context(), check, time.Now().Add(-time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -324,7 +324,7 @@ func TestShutdownDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer history.Close(context.Background())
-	total, _, err := history.Counts(t.Context(), "web", time.Now().Add(-time.Hour))
+	total, _, _, err := history.Counts(t.Context(), "web", time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,11 @@
 // probed every 30 seconds that fails for 10 minutes loses 20 of the 86,400
 // samples in a 30-day window. Time when the monitor itself was not running
 // produces no probes and so counts neither for nor against a check.
+//
+// Until a check's history reaches back a whole window, its figures cover
+// only the time since its first probe, and its Status says so. An incident
+// in a check's first hours therefore weighs as much as it did in the time
+// measured, and can overspend the budget until more history dilutes it.
 package slo
 
 import (
@@ -29,6 +34,11 @@ type Status struct {
 	// failures the target allows) not yet used. It goes negative once the
 	// budget is overspent, showing by how much.
 	BudgetRemaining float64
+	// Since is when the period measured begins: the start of the window or,
+	// while the check's history doesn't reach back that far, its first
+	// probe, in which case Partial is set.
+	Since   time.Time
+	Partial bool
 }
 
 // Compute measures failed failures out of total probes against target, a
@@ -51,9 +61,10 @@ func Compute(target float64, window time.Duration, total, failed int) (Status, b
 	}, true
 }
 
-// Counter counts a check's probes, and failed probes, since a time.
+// Counter counts a check's probes, and failed probes, since a time, and
+// reports when the check's oldest kept probe started (zero if none).
 type Counter interface {
-	Counts(ctx context.Context, check string, since time.Time) (total, failed int, err error)
+	Counts(ctx context.Context, check string, since time.Time) (total, failed int, first time.Time, err error)
 }
 
 // Evaluate returns the status of every check that has an SLO and probes in
@@ -66,12 +77,20 @@ func Evaluate(ctx context.Context, counter Counter, checks []config.Check, now t
 		if c.SLO == nil {
 			continue
 		}
-		total, failed, err := counter.Counts(ctx, c.Name, now.Add(-c.SLO.Window()))
+		start := now.Add(-c.SLO.Window())
+		total, failed, first, err := counter.Counts(ctx, c.Name, start)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("counting probes of %s: %w", c.Name, err))
 			continue
 		}
 		if s, ok := Compute(c.SLO.Ratio(), c.SLO.Window(), total, failed); ok {
+			// The check's first probe ever decides, not its first in the
+			// window: if the monitor was down when the window began, the
+			// window is still covered, and that time counts for neither side.
+			s.Since, s.Partial = start, first.After(start)
+			if s.Partial {
+				s.Since = first
+			}
 			statuses[c.Name] = s
 		}
 	}

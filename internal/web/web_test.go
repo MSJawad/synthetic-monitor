@@ -142,20 +142,34 @@ func TestErrorBudget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		status, _ := slo.Compute(0.995, 30*24*time.Hour, 1000, tt.failed)
-		v := buildSLO(status, config.SLO{Target: 99.5, WindowDays: 30})
+		v := buildSLO(status, config.SLO{Target: 99.5, WindowDays: 30}, now)
 		if v.Budget != tt.text || v.Meter.Level != tt.level || v.Meter.Fill != tt.fill {
 			t.Errorf("%d failed: %q, level %q, fill %q; want %q, %q, %q",
 				tt.failed, v.Budget, v.Meter.Level, v.Meter.Fill, tt.text, tt.level, tt.fill)
 		}
-		if v.Window != "30 days" || v.Target != "99.5%" {
-			t.Errorf("window %q, target %q; want 30 days and 99.5%%", v.Window, v.Target)
+		if v.Label != "Availability, last 30 days" || v.Target != "99.5%" {
+			t.Errorf("label %q, target %q; want the last 30 days and 99.5%%", v.Label, v.Target)
 		}
 	}
 
 	// A short history allows no failures at all yet.
 	early, _ := slo.Compute(0.999, 7*24*time.Hour, 29, 1)
-	if v := buildSLO(early, config.SLO{Target: 99.9, WindowDays: 7}); v.Budget != "Error budget used up: 1 failed probe, 0 allowed" {
+	if v := buildSLO(early, config.SLO{Target: 99.9, WindowDays: 7}, now); v.Budget != "Error budget used up: 1 failed probe, 0 allowed" {
 		t.Errorf("early budget = %q", v.Budget)
+	}
+}
+
+func TestSLOLabelWhileHistoryIsShorterThanTheWindow(t *testing.T) {
+	status, _ := slo.Compute(0.995, 30*24*time.Hour, 100, 0)
+	status.Partial = true
+	for since, want := range map[time.Time]string{
+		now.Add(-2 * time.Hour):  "Availability since 13:00:00 UTC",
+		now.Add(-48 * time.Hour): "Availability since Oct 19 15:00 UTC",
+	} {
+		status.Since = since
+		if got := buildSLO(status, config.SLO{Target: 99.5, WindowDays: 30}, now).Label; got != want {
+			t.Errorf("history since %v: label %q, want %q", since, got, want)
+		}
 	}
 }
 
@@ -257,7 +271,8 @@ func fakeSource() Source {
 			return samples[check], nil
 		},
 		SLOs: func() map[string]slo.Status {
-			return map[string]slo.Status{"apartment-api": {Target: 0.999, Total: 1000, Failed: 2, Availability: 0.998, BudgetRemaining: -1}}
+			return map[string]slo.Status{"apartment-api": {Target: 0.999, Total: 1000, Failed: 2, Availability: 0.998, BudgetRemaining: -1,
+				Since: now.Add(-3 * time.Hour), Partial: true}}
 		},
 		Firing: func() map[string]time.Time {
 			// The alert manager keeps local times; the JSON must not.
@@ -293,6 +308,7 @@ func TestPage(t *testing.T) {
 		`<span class="pill" data-state="down">`,
 		"Down since 14:59:58 UTC, 2s ago",
 		"Error budget used up: 2 failed probes, 1 allowed",
+		"Availability since 12:00:00 UTC",
 		`Failed<span class="metric-aside">timed out</span>`,
 		"<summary>Recent probes</summary>",
 		"History unavailable",
@@ -328,6 +344,9 @@ func TestAPI(t *testing.T) {
 	if api.State != stateDown || api.LastProbe == nil || api.LastProbe.OK || api.LastProbe.Reason != probe.ReasonTimeout ||
 		api.SLO == nil || api.SLO.FailedProbes != 2 || api.FailingSince.IsZero() {
 		t.Errorf("apartment-api = %+v, want down with its last probe and SLO", api)
+	}
+	if api.SLO != nil && !api.SLO.Since.Equal(now.Add(-3*time.Hour)) {
+		t.Errorf("SLO since = %v, want the check's first probe 3 hours ago", api.SLO.Since)
 	}
 	if api.FailingSince.Location() != time.UTC {
 		t.Errorf("failing_since is in %v, want UTC like every other timestamp", api.FailingSince.Location())

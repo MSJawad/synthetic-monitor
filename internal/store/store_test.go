@@ -48,7 +48,7 @@ func result(check string, start time.Time, reason probe.Reason) scheduler.Result
 
 func counts(t *testing.T, s *Store, check string, since time.Time) (int, int) {
 	t.Helper()
-	total, failed, err := s.Counts(t.Context(), check, since)
+	total, failed, _, err := s.Counts(t.Context(), check, since)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +90,27 @@ func TestCountsOnlyIncludesWindow(t *testing.T) {
 	}
 	if total, failed := counts(t, s, "missing", now.Add(-time.Hour)); total != 0 || failed != 0 {
 		t.Errorf("unknown check: %d probes, %d failed; want 0 and 0", total, failed)
+	}
+}
+
+func TestCountsReportsTheFirstProbe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	now := time.Now().Truncate(time.Millisecond)
+	s := open(t, path, Options{})
+	for _, age := range []time.Duration{10 * time.Minute, 5 * time.Minute, time.Minute} {
+		s.Record(result("web", now.Add(-age), ""))
+	}
+	closeStore(t, s)
+	s = open(t, path, Options{})
+	defer closeStore(t, s)
+
+	// The first probe of all, not the first in the window counted.
+	_, _, first, err := s.Counts(t.Context(), "web", now.Add(-6*time.Minute))
+	if err != nil || !first.Equal(now.Add(-10*time.Minute)) {
+		t.Errorf("first = %v, %v; want the probe 10 minutes ago, %v", first, err, now.Add(-10*time.Minute))
+	}
+	if _, _, first, err := s.Counts(t.Context(), "missing", now.Add(-time.Hour)); err != nil || !first.IsZero() {
+		t.Errorf("unknown check: first = %v, %v; want zero", first, err)
 	}
 }
 

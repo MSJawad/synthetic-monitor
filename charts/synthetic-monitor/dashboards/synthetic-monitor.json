@@ -505,7 +505,7 @@
       "id": 6,
       "type": "table",
       "title": "SLOs",
-      "description": "Each check's availability over its own SLO window, against its target.",
+      "description": "Each check's availability over its own SLO window (or since its first probe, while its history is shorter), against its target.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

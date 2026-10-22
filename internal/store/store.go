@@ -310,12 +310,18 @@ func (s *Store) prune(ctx context.Context) error {
 	}
 }
 
-// Counts returns how many probes of check started at or after since, and
-// how many of them failed.
-func (s *Store) Counts(ctx context.Context, check string, since time.Time) (total, failed int, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(1 - success), 0)
-		FROM results WHERE check_name = ? AND started_at >= ?`, check, since.UnixMilli()).Scan(&total, &failed)
-	return total, failed, err
+// Counts returns how many probes of check started at or after since, how
+// many of them failed, and when the check's oldest kept probe started (zero
+// if it has none).
+func (s *Store) Counts(ctx context.Context, check string, since time.Time) (total, failed int, first time.Time, err error) {
+	var firstMilli sql.NullInt64
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(1 - success), 0),
+		(SELECT MIN(started_at) FROM results WHERE check_name = ?1)
+		FROM results WHERE check_name = ?1 AND started_at >= ?2`, check, since.UnixMilli()).Scan(&total, &failed, &firstMilli)
+	if firstMilli.Valid {
+		first = time.UnixMilli(firstMilli.Int64)
+	}
+	return total, failed, first, err
 }
 
 // truncate shortens s to at most n bytes without splitting a UTF-8

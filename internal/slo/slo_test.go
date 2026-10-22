@@ -60,16 +60,17 @@ func TestCompute(t *testing.T) {
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
-// fakeCounter answers Counts from a table and records the windows asked for.
+// fakeCounter answers Counts from tables and records the windows asked for.
 type fakeCounter struct {
 	mu     sync.Mutex
 	counts map[string][2]int
+	first  map[string]time.Time
 	failOn string
 	since  map[string]time.Time
 	calls  int
 }
 
-func (f *fakeCounter) Counts(_ context.Context, check string, since time.Time) (int, int, error) {
+func (f *fakeCounter) Counts(_ context.Context, check string, since time.Time) (int, int, time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -78,10 +79,10 @@ func (f *fakeCounter) Counts(_ context.Context, check string, since time.Time) (
 	}
 	f.since[check] = since
 	if check == f.failOn {
-		return 0, 0, errors.New("database is locked")
+		return 0, 0, time.Time{}, errors.New("database is locked")
 	}
 	c := f.counts[check]
-	return c[0], c[1], nil
+	return c[0], c[1], f.first[check], nil
 }
 
 func withSLO(name string, target float64, days int) config.Check {
@@ -90,7 +91,13 @@ func withSLO(name string, target float64, days int) config.Check {
 
 func TestEvaluate(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
-	counter := &fakeCounter{counts: map[string][2]int{"web": {2000, 4}, "api": {100, 0}}, failOn: "broken"}
+	counter := &fakeCounter{
+		counts: map[string][2]int{"web": {2000, 4}, "api": {100, 0}},
+		// web's history goes back further than its window; api's began an
+		// hour ago.
+		first:  map[string]time.Time{"web": now.Add(-40 * 24 * time.Hour), "api": now.Add(-time.Hour)},
+		failOn: "broken",
+	}
 	checks := []config.Check{
 		withSLO("web", 99.5, 30),
 		withSLO("api", 99.9, 7),
@@ -111,6 +118,12 @@ func TestEvaluate(t *testing.T) {
 	}
 	if since := counter.since["api"]; !since.Equal(now.Add(-7 * 24 * time.Hour)) {
 		t.Errorf("api counted from %v, want its 7-day window", since)
+	}
+	if s := statuses["web"]; s.Partial || !s.Since.Equal(now.Add(-30*24*time.Hour)) {
+		t.Errorf("web: partial %v since %v; want its whole 30-day window", s.Partial, s.Since)
+	}
+	if s := statuses["api"]; !s.Partial || !s.Since.Equal(now.Add(-time.Hour)) {
+		t.Errorf("api: partial %v since %v; want partial, since its first probe an hour ago", s.Partial, s.Since)
 	}
 	if _, asked := counter.since["no-slo"]; asked {
 		t.Error("Evaluate counted probes of a check without an SLO")

@@ -134,12 +134,15 @@ type apiProbe struct {
 }
 
 type apiSLO struct {
-	Target               float64 `json:"target"`
-	WindowDays           int     `json:"window_days"`
-	Probes               int     `json:"probes"`
-	FailedProbes         int     `json:"failed_probes"`
-	Availability         float64 `json:"availability"`
-	ErrorBudgetRemaining float64 `json:"error_budget_remaining"`
+	Target     float64 `json:"target"`
+	WindowDays int     `json:"window_days"`
+	// Since is when the period measured begins: the window's start, or
+	// the check's first probe while its history is shorter than the window.
+	Since                time.Time `json:"since"`
+	Probes               int       `json:"probes"`
+	FailedProbes         int       `json:"failed_probes"`
+	Availability         float64   `json:"availability"`
+	ErrorBudgetRemaining float64   `json:"error_budget_remaining"`
 }
 
 func (h *handler) api(w http.ResponseWriter, r *http.Request) {
@@ -156,8 +159,9 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 				LatencyMS: float64(last.Duration) / float64(time.Millisecond), Reason: last.Reason}
 		}
 		if in.slo != nil && in.check.SLO != nil {
-			c.SLO = &apiSLO{Target: in.slo.Target, WindowDays: in.check.SLO.WindowDays, Probes: in.slo.Total,
-				FailedProbes: in.slo.Failed, Availability: in.slo.Availability, ErrorBudgetRemaining: in.slo.BudgetRemaining}
+			c.SLO = &apiSLO{Target: in.slo.Target, WindowDays: in.check.SLO.WindowDays, Since: in.slo.Since.UTC(),
+				Probes: in.slo.Total, FailedProbes: in.slo.Failed, Availability: in.slo.Availability,
+				ErrorBudgetRemaining: in.slo.BudgetRemaining}
 		}
 		out.Checks = append(out.Checks, c)
 	}

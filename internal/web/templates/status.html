@@ -57,7 +57,7 @@
 
         <section class="metric">
           {{- with .SLO}}
-          <h3 class="metric-label">Availability, last {{.Window}}</h3>
+          <h3 class="metric-label">{{.Label}}</h3>
           <p class="metric-value">{{.Availability}}<span class="metric-aside">target {{.Target}}</span></p>
           <svg class="meter" data-level="{{.Meter.Level}}" width="100%" height="6" role="img" aria-label="{{.Budget}}">
             <rect class="meter-track" width="100%" height="6" rx="3"/>
