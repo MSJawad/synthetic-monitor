@@ -44,7 +44,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: monitor
-          image: "{{ .Values.image.repository }}:{{ required "image.tag is required: the commit SHA of the image to run" .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ include "synthetic-monitor.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - -config=/etc/synthetic-monitor/checks.yaml

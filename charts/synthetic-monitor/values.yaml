@@ -1,7 +1,10 @@
 image:
   repository: ghcr.io/msjawad/synthetic-monitor
-  # Required: the commit SHA of the image to run. CI tags every image it
-  # pushes from main with its commit SHA; there is no "latest".
+  # The commit SHA of the image to run: CI tags every image it pushes from
+  # main with its commit SHA, and there is no "latest". Empty uses the
+  # chart's appVersion, which CI sets to the same commit when it publishes
+  # the chart, so a published chart runs the image built alongside it. A
+  # chart used from a checkout has no appVersion and needs this set.
   tag: ""
   pullPolicy: IfNotPresent
 

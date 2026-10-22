@@ -12,9 +12,14 @@ app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* The image's tag: image.tag, or else the appVersion CI gives a published chart. */}}
+{{- define "synthetic-monitor.imageTag" -}}
+{{- required "image.tag is required when the chart has no appVersion: the commit SHA of the image to run" (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- end -}}
+
 {{- define "synthetic-monitor.labels" -}}
 {{ include "synthetic-monitor.selectorLabels" . }}
-app.kubernetes.io/version: {{ .Values.image.tag | trunc 63 | quote }}
+app.kubernetes.io/version: {{ include "synthetic-monitor.imageTag" . | trunc 63 | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
