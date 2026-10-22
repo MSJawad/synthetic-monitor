@@ -1,15 +1,19 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/goleak"
+	"go.yaml.in/yaml/v3"
 )
 
 // noEnv is an environment with no variables set.
@@ -361,6 +365,50 @@ func TestExampleConfigsAreValid(t *testing.T) {
 		if !types[want] {
 			t.Errorf("examples/app-checks.yaml has no %s check", want)
 		}
+	}
+}
+
+// The production checks are values of a Flux HelmRelease, applied as soon as
+// they reach main; a mistake there would only show as a pod that won't start.
+func TestProductionChecksAreValid(t *testing.T) {
+	const path = "../../deploy/flux/synthetic-monitor.yaml"
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	dec := yaml.NewDecoder(f)
+	for {
+		var doc struct {
+			Kind string `yaml:"kind"`
+			Spec struct {
+				Values struct {
+					Checks yaml.Node `yaml:"checks"`
+				} `yaml:"values"`
+			} `yaml:"spec"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			t.Fatalf("%s has no HelmRelease", path)
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if doc.Kind != "HelmRelease" {
+			continue
+		}
+		data, err := yaml.Marshal(map[string]*yaml.Node{"checks": &doc.Spec.Values.Checks})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Parse(data, noEnv)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if len(cfg.Checks) == 0 {
+			t.Fatalf("%s has no checks", path)
+		}
+		return
 	}
 }
 

@@ -71,6 +71,12 @@ jobs:
             --set image.tag=ci --set serviceMonitor.enabled=true --set grafanaDashboard.enabled=true \
             --set ingress.enabled=true --set ingress.host=status.example.com --set ingress.tls.secretName=status-tls > /dev/null
           jq empty charts/synthetic-monitor/dashboards/synthetic-monitor.json
+      # The values Flux deploys, checked against the chart's schema; the Go
+      # tests check the checks among them.
+      - name: Render the Helm chart with the production values
+        run: |
+          yq 'select(.kind == "HelmRelease") | .spec.values' deploy/flux/synthetic-monitor.yaml > "$RUNNER_TEMP/production.yaml"
+          helm template synthetic-monitor charts/synthetic-monitor -f "$RUNNER_TEMP/production.yaml" --set image.tag=ci > /dev/null
 
   image:
     needs: [lint, test, chart]

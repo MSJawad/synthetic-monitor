@@ -1,0 +1,97 @@
+# The monitor. CI publishes each build on main as chart version 0.1.<run
+# number>; Flux checks the registry every minute and upgrades to the highest.
+#
+# Two Secrets in this namespace are created by hand, never committed:
+# ghcr (a docker-registry Secret that can read the private packages) and
+# synthetic-monitor (NTFY_URL, HEARTBEAT_TOKEN and WATCHDOG_URL). The README's
+# production section has the commands.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: synthetic-monitor
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: synthetic-monitor
+  namespace: synthetic-monitor
+spec:
+  interval: 1m
+  url: oci://ghcr.io/msjawad/charts/synthetic-monitor
+  secretRef:
+    name: ghcr
+  ref:
+    semver: ">=0.1.0"
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: synthetic-monitor
+  namespace: synthetic-monitor
+spec:
+  interval: 10m
+  chartRef:
+    kind: OCIRepository
+    name: synthetic-monitor
+  # The chart's ServiceMonitor is a kind the stack's CRDs define.
+  dependsOn:
+    - name: kube-prometheus-stack
+      namespace: monitoring
+  upgrade:
+    cleanupOnFail: true
+    # A release whose pod doesn't become ready is rolled back at once, and
+    # not retried until a new version arrives.
+    remediation:
+      retries: 0
+      strategy: rollback
+  values:
+    existingSecret: synthetic-monitor
+    imagePullSecrets:
+      - name: ghcr
+    serviceMonitor:
+      enabled: true
+    grafanaDashboard:
+      enabled: true
+    ingress:
+      enabled: true
+      className: traefik
+      # The server's public IP with dashes, resolved by sslip.io.
+      host: status.92-5-186-10.sslip.io
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-staging
+      tls:
+        secretName: synthetic-monitor-tls
+    # Edits here reach the running pod without a restart.
+    checks:
+      # The request every page load makes, from outside: sslip.io's DNS,
+      # the public IP, Traefik, the certificate, the API and Postgres. The
+      # SLO allows 3.6 hours down in 30 days, about what one server with no
+      # redundancy can promise.
+      - name: apartment
+        interval: 30s
+        timeout: 10s
+        slo:
+          target: 99.5
+          window_days: 30
+        http:
+          url: https://92-5-186-10.sslip.io/api/listings
+          body_contains: '"listings":'
+
+      # cert-manager renews at 30 days left, so this fails only once
+      # renewal has been failing for over two weeks.
+      - name: apartment-cert
+        interval: 1h
+        tls:
+          address: 92-5-186-10.sslip.io:443
+          min_days_remaining: 14
+
+      # sslip.io is a free third-party service the site's name depends on.
+      # When it fails, this says why the site is unreachable.
+      - name: sslip-dns
+        interval: 1m
+        dns:
+          host: 92-5-186-10.sslip.io.
+          expect_addresses: [92.5.186.10]
