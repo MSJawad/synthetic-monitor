@@ -156,6 +156,9 @@ misspelled ones are rejected.
 - **Private image:** while the GHCR package is private, the cluster needs a
   pull secret: a `docker-registry` Secret holding a token that can read
   packages, passed as `--set imagePullSecrets[0].name=<secret>`.
+- **Public address:** `--set ingress.enabled=true --set ingress.host=<host>`
+  exposes the status page and the heartbeat endpoint, with the certificate's
+  issuer set through `ingress.annotations` and `ingress.tls.secretName`.
 - **Prometheus and Grafana:** with
   [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack),
   `--set serviceMonitor.enabled=true --set serviceMonitor.labels.release=<its release name>`
@@ -728,3 +731,12 @@ short gap; the outside service's grace period should cover one (a few
 minutes). The URL usually identifies the account, so it is treated as a
 secret: Go's HTTP errors quote the URL, and the watchdog logs only the
 underlying cause.
+
+### Only the status page and heartbeats are public
+
+The chart's Ingress lists the paths it routes (`/`, `/api/status`,
+`/static/` and `/heartbeat/`) rather than routing everything except a few.
+`/metrics`, `/healthz` and `/readyz` stay inside the cluster, where
+Prometheus and the kubelet reach them directly. A list of allowed paths
+fails closed: an endpoint added later is private until someone adds it. A
+list of blocked paths fails open: one forgotten entry publishes it.

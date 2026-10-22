@@ -50,6 +50,21 @@
         "port": {"type": "integer", "minimum": 1, "maximum": 65535}
       }
     },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "className": {"type": "string"},
+        "host": {"type": "string"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"secretName": {"type": "string"}}
+        }
+      }
+    },
     "serviceMonitor": {
       "type": "object",
       "additionalProperties": false,

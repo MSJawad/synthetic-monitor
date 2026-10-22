@@ -55,7 +55,8 @@ jobs:
       - name: Render the Helm chart
         run: |
           helm template synthetic-monitor charts/synthetic-monitor -f examples/checks.yaml \
-            --set image.tag=ci --set serviceMonitor.enabled=true --set grafanaDashboard.enabled=true > /dev/null
+            --set image.tag=ci --set serviceMonitor.enabled=true --set grafanaDashboard.enabled=true \
+            --set ingress.enabled=true --set ingress.host=status.example.com --set ingress.tls.secretName=status-tls > /dev/null
           jq empty charts/synthetic-monitor/dashboards/synthetic-monitor.json
 
   image:

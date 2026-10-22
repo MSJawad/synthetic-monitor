@@ -41,6 +41,21 @@ persistence:
 service:
   port: 80
 
+# Exposes the status page and the heartbeat endpoint, and nothing else.
+ingress:
+  enabled: false
+  # Empty uses the cluster's default ingress class (Traefik on k3s).
+  className: ""
+  # Required when enabled, e.g. status.203.0.113.7.sslip.io.
+  host: ""
+  # How the certificate is issued depends on the cluster, e.g.
+  # cert-manager.io/cluster-issuer: letsencrypt
+  annotations: {}
+  tls:
+    # The Secret holding the certificate. Empty leaves TLS to the ingress
+    # controller's own configuration.
+    secretName: ""
+
 # Prometheus Operator scrape config. kube-prometheus-stack only selects
 # ServiceMonitors labelled with its release name, e.g.
 # labels: {release: kube-prometheus-stack}.
