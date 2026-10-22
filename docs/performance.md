@@ -1,10 +1,13 @@
 # Performance
 
 How many checks one instance runs, what each probe costs, and what limits it
-first. Everything here was measured on one Apple M1 (8 cores: 4 performance,
-4 efficiency), natively on macOS and on Linux arm64 in Docker Desktop's VM on
-the same machine. Linux is what production runs; numbers from the Oracle
-Ampere A1 node will be added once the service is deployed there.
+first. It was measured on two machines:
+
+- **An Apple M1** (8 cores: 4 performance, 4 efficiency), natively on macOS
+  and on Linux arm64 in Docker Desktop's VM on the same machine.
+- **The production node:** an Oracle Cloud Ampere A1 VM (Neoverse-N1, 2
+  cores) running k3s. The benchmarks ran on the host beside the production
+  pods, which used about 0.15 cores meanwhile.
 
 ## Method
 
@@ -21,8 +24,8 @@ in the same process. Each level runs for 2×MSL plus 5 seconds before being
 measured for 10 seconds, so the TIME_WAIT connections it creates have reached
 a steady state. A level is *sustained* if at least 99% of the scheduled probes
 ran, none failed, and the 99th percentile of scheduling lag (how late a probe
-started) stayed under 100 ms. All probes go to one destination, the worst case
-for local ports.
+started) stayed under 100 ms. Each probe type steps up until a level is not
+sustained. All probes go to one destination, the worst case for local ports.
 
 ```sh
 # per probe
@@ -34,21 +37,30 @@ go test -run TestLoad -v -timeout 60m ./cmd/synthetic-monitor -args -load -load-
 # the same on Linux arm64, from a Mac
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o load.test ./cmd/synthetic-monitor
 docker run --rm -v "$PWD":/b alpine:3.22 /b/load.test -test.run TestLoad -test.v -test.timeout 60m -load
+
+# on the production node, copied there with scp: a transient unit, so a
+# dropped SSH session doesn't stop it
+sudo systemd-run --uid=ubuntu --working-directory="$HOME/bench" \
+  -p StandardOutput=file:"$HOME/bench/load.log" "$HOME/bench/load.test" -test.run TestLoad -test.v -load
 ```
 
 ## Per probe
 
 Median of three runs; CPU includes the target server's share.
 
-| Probe | CPU per probe, macOS | CPU per probe, Linux | Allocations | Bytes allocated |
-|---|---|---|---|---|
-| HTTP | 223 µs | 165 µs | 156 | 20 KB |
-| HTTPS | 1,330 µs | 1,361 µs | 1,037 | 147 KB |
-| TCP | 108 µs | 40 µs | 30 to 42 | 2 KB |
-| TLS | 1,159 µs | 1,210 µs | 907 | 127 KB |
-| DNS | 5 µs | 5 µs | 20 | 1 KB |
+| Probe | CPU per probe, M1 macOS | CPU per probe, M1 Linux | CPU per probe, Ampere A1 | Allocations | Bytes allocated |
+|---|---|---|---|---|---|
+| HTTP | 223 µs | 165 µs | 256 µs | 156 | 20 KB |
+| HTTPS | 1,330 µs | 1,361 µs | 2,469 µs | 1,033 to 1,037 | 144 to 147 KB |
+| TCP | 108 µs | 40 µs | 123 µs | 30 to 42 | 2 KB |
+| TLS | 1,159 µs | 1,210 µs | 2,307 µs | 905 to 907 | 124 to 127 KB |
+| DNS | 5 µs | 5 µs | 9 µs | 20 | 1 KB |
 
-A TLS handshake makes a probe six to eight times more expensive than plain
+A Neoverse-N1 core takes about 1.5 times as long as an M1 performance core
+for an HTTP probe, and 1.8 to 1.9 times as long for one with a TLS handshake. The allocations
+are the same everywhere, as they should be for the same code.
+
+A TLS handshake makes a probe six to ten times more expensive than plain
 HTTP, and most of that is the key exchange. Since Go 1.24, TLS negotiates the
 post-quantum hybrid X25519MLKEM768 by default; with Go at both ends here, its
 ML-KEM half (key generation, encapsulation and decapsulation) costs more than
@@ -59,7 +71,22 @@ macOS's, which shows most in the TCP probe.
 
 ## Whole service
 
-### Linux arm64
+### Ampere A1, the production node (2 cores)
+
+| Probe | Checks | Probes/s | Ran | Failed | Lag p50 | Lag p99 | CPU cores | CPU per probe | Heap | Sustained |
+|---|---|---|---|---|---|---|---|---|---|---|
+| HTTP | 1,000 | 1,000 | 100% | 0 | 0.4 ms | 3.8 ms | 0.47 | 472 µs | 23 MB | yes |
+| HTTP | 2,000 | 2,000 | 100% | 0 | 0.2 ms | 6.5 ms | 0.85 | 424 µs | 32 MB | yes |
+| HTTP | 4,000 | 3,973 | 99.3% | 0 | 5.1 ms | 149 ms | 1.54 | 387 µs | 69 MB | no: lag, near the CPU limit |
+| HTTPS | 500 | 500 | 100% | 0 | 0.3 ms | 6.6 ms | 1.16 | 2.32 ms | 22 MB | yes |
+| HTTPS | 1,000 | 734 | 73% | 0 | 749 ms | 1.4 s | 1.64 | 2.23 ms | 38 MB | no: out of CPU |
+
+At 4,000 HTTP checks the node's two cores were close to full: the monitor
+used 1.54, production about 0.15, and the kernel's network processing more.
+Lag rises steeply as a CPU nears saturation, so the sustainable level lies
+between 2,000 and 4,000.
+
+### M1, Linux arm64
 
 | Probe | Checks | Probes/s | Ran | Failed | Lag p50 | Lag p99 | CPU cores | CPU per probe | Heap | Sustained |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -73,7 +100,7 @@ macOS's, which shows most in the TCP probe.
 | HTTPS | 5,000 | 5,010 | 100% | 0 | 0.2 ms | 20 ms | 6.52 | 1.30 ms | 132 MB | yes |
 | HTTPS | 6,000 | 5,604 | 93% | 0 | 705 ms | 1.1 s | 7.69 | 1.37 ms | 166 MB | no: out of CPU |
 
-### macOS
+### M1, macOS
 
 | Probe | Checks | Probes/s | Ran | Failed | Lag p50 | Lag p99 | CPU cores | CPU per probe | Heap | Sustained |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -93,7 +120,7 @@ about 18 KB per check.
 
 ## Where the CPU goes
 
-From the CPU profiles of the Linux runs, attributing each sample to the
+From the CPU profiles of the M1 Linux runs, attributing each sample to the
 first component found on its stack:
 
 | Component | HTTP, 24,000/s | HTTPS, 5,000/s |
@@ -115,7 +142,10 @@ both ends. One goroutine and one timer per check cost little: the runtime's
 timer bookkeeping (`runtime.(*timers).check`) is about 1% with 24,000 timers
 firing a second.
 
-## The first limit is local ports, not CPU
+## Local ports can run out before CPU
+
+On the 2-core production node, CPU runs out long before local ports do. With
+the M1's eight cores, ports can run out first.
 
 Every probe opens a new connection, and whichever side closes a connection
 first keeps its port in TIME_WAIT for 2×MSL (30 seconds on macOS, 60 on
@@ -153,10 +183,35 @@ sub-second benchmark by an order of magnitude. That is why the per-probe
 figures above are CPU time, which does not count the wait, and why each
 benchmark warms its server first.
 
+## Benchmarking beside production
+
+The first two runs on the node were made at the lowest CPU weight
+(`CPUWeight=1` on a systemd slice), so that production would always win the
+CPU. That made the results wrong. With weight 1 the benchmark, including
+its in-process target server, got almost no CPU whenever production briefly
+wanted some. Stalls of 130 to 210 ms failed HTTP levels at 1,000 and 2,000
+checks while three quarters of the CPU was idle, and the two runs disagreed
+on which level failed. At the normal weight the same levels ran with a p99
+lag under 7 ms.
+
+Production barely noticed the normal-weight run. The apartment site's own
+p99 latency stayed at 5 ms, the monitor's checks of it averaged 18 to 40 ms
+except for one minute at 180 ms, and no alerts went out. Its CPU needs were a
+few percent of the node, which the normal weight still guarantees many times
+over.
+
+The kernel's counters show one more thing worth knowing. Almost every
+"retransmitted" segment counted during the runs was a tail loss probe:
+Linux resends speculatively when an ACK is late, as ACKs are once the CPU
+is saturated. Retransmission timeouts did not change, and the kernel dropped
+no packets.
+
 ## What it means
 
-Checks normally run every 30 seconds or more. On Linux, one instance's CPU
-would cover about 720,000 HTTP checks or 150,000 HTTPS checks at that
-interval, at around 18 KB of memory per check. Long before that, the limits
+Checks normally run every 30 seconds or more. On the M1 under Linux, one
+instance's CPU would cover about 720,000 HTTP checks or 150,000 HTTPS checks
+at that interval, at around 18 KB of memory per check. The 2-core production
+node, shared with the apps it watches, sustains 60,000 HTTP or 15,000 HTTPS
+checks at that interval; it runs four. Long before that, the limits
 would be the targets, the network, and the operator's patience with that many
 alerts.
