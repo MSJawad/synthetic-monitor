@@ -12,7 +12,7 @@ import (
 // AlertStates returns the alerting state of every check that is not
 // healthy.
 func (s *Store) AlertStates(ctx context.Context) (map[string]alert.State, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT check_name, firing, streak, streak_start, firing_since,
+	rows, err := s.db.QueryContext(ctx, `SELECT check_name, firing, burning, streak, streak_start, firing_since,
 		last_reason, last_error FROM alert_state`)
 	if err != nil {
 		return nil, err
@@ -26,7 +26,7 @@ func (s *Store) AlertStates(ctx context.Context) (map[string]alert.State, error)
 			streakStart, firingSince int64
 			reason                   string
 		)
-		if err := rows.Scan(&name, &st.Firing, &st.Streak, &streakStart, &firingSince, &reason, &st.LastError); err != nil {
+		if err := rows.Scan(&name, &st.Firing, &st.Burning, &st.Streak, &streakStart, &firingSince, &reason, &st.LastError); err != nil {
 			return nil, err
 		}
 		st.StreakStart, st.FiringSince = fromMillis(streakStart), fromMillis(firingSince)
@@ -51,12 +51,12 @@ func (s *Store) SaveAlertState(ctx context.Context, check string, st alert.State
 		_, err = tx.ExecContext(ctx, `DELETE FROM alert_state WHERE check_name = ?`, check)
 	} else {
 		_, err = tx.ExecContext(ctx, `INSERT INTO alert_state
-			(check_name, firing, streak, streak_start, firing_since, last_reason, last_error)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (check_name) DO UPDATE SET firing = excluded.firing, streak = excluded.streak,
-				streak_start = excluded.streak_start, firing_since = excluded.firing_since,
+			(check_name, firing, burning, streak, streak_start, firing_since, last_reason, last_error)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (check_name) DO UPDATE SET firing = excluded.firing, burning = excluded.burning,
+				streak = excluded.streak, streak_start = excluded.streak_start, firing_since = excluded.firing_since,
 				last_reason = excluded.last_reason, last_error = excluded.last_error`,
-			check, st.Firing, st.Streak, toMillis(st.StreakStart), toMillis(st.FiringSince),
+			check, st.Firing, st.Burning, st.Streak, toMillis(st.StreakStart), toMillis(st.FiringSince),
 			string(st.LastReason), truncate(st.LastError, maxErrorLen))
 	}
 	if err != nil {

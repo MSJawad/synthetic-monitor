@@ -26,9 +26,18 @@ const (
 )
 
 // State is a check's alerting state. The zero value is healthy.
+//
+// An incident starts when enough probes fail in a row, or when the check's
+// error budget is burning too fast, as it does when probes fail on and off.
+// It ends only once enough probes in a row have succeeded and the budget
+// has stopped burning, so a check failing on and off stays in one incident
+// rather than alerting and recovering over and over.
 type State struct {
 	// Firing is true from the alert until the recovery notice.
 	Firing bool
+	// Burning is true while an error budget burn rule fires for the check,
+	// which holds back the recovery.
+	Burning bool
 	// Streak counts consecutive failed probes while not firing, and
 	// consecutive successful probes while firing.
 	Streak int
@@ -43,12 +52,12 @@ type State struct {
 
 // IsZero reports whether s is the healthy state with nothing to remember.
 func (s State) IsZero() bool {
-	return !s.Firing && s.Streak == 0
+	return !s.Firing && !s.Burning && s.Streak == 0
 }
 
 // Equal reports whether s and o are the same state.
 func (s State) Equal(o State) bool {
-	return s.Firing == o.Firing && s.Streak == o.Streak &&
+	return s.Firing == o.Firing && s.Burning == o.Burning && s.Streak == o.Streak &&
 		s.StreakStart.Equal(o.StreakStart) && s.FiringSince.Equal(o.FiringSince) &&
 		s.LastReason == o.LastReason && s.LastError == o.LastError
 }
@@ -70,6 +79,19 @@ type Notification struct {
 	Probes int          `json:"probes,omitempty"`
 	Reason probe.Reason `json:"reason,omitempty"`
 	Error  string       `json:"error,omitempty"`
+	// Burn is set on an alert that a burn rule raised.
+	Burn *Burn `json:"burn,omitempty"`
+}
+
+// Burn describes an error budget burn rule that fires for a check: Failed
+// of the Total probes over the last Window failed, the first at Since,
+// spending the budget Rate times as fast as the SLO allows.
+type Burn struct {
+	Failed int           `json:"failed"`
+	Total  int           `json:"total"`
+	Window time.Duration `json:"window"`
+	Rate   float64       `json:"rate"`
+	Since  time.Time     `json:"since"`
 }
 
 // Thresholds are the numbers of probes in a row that change a check's state.
@@ -112,12 +134,40 @@ func Next(s State, r scheduler.Result, t Thresholds) (State, *Notification) {
 			s.StreakStart = r.Start
 		}
 		s.Streak++
-		if s.Streak < t.Successes {
+		if s.Streak < t.Successes || s.Burning {
 			return s, nil
 		}
-		return State{}, &Notification{Kind: KindRecovery, Check: r.Check, At: r.Start, Since: s.FiringSince,
-			Until: s.StreakStart, Probes: s.Streak, Reason: s.LastReason, Error: s.LastError}
+		return State{}, recovery(r.Check, r.Start, s)
 	}
+}
+
+// NextBurn returns the state after an SLO evaluation of check, whose state
+// is s: b is the burn rule that fires, or nil if none does. A burn raises
+// an alert if the check isn't firing already, and once it clears, a
+// recovery it was holding back goes out.
+func NextBurn(s State, check string, b *Burn, at time.Time, t Thresholds) (State, *Notification) {
+	switch {
+	case b != nil && !s.Firing:
+		n := &Notification{Kind: KindAlert, Check: check, At: at, Since: b.Since,
+			Reason: s.LastReason, Error: s.LastError, Burn: b}
+		return State{Firing: true, Burning: true, FiringSince: b.Since, LastReason: s.LastReason, LastError: s.LastError}, n
+	case b != nil:
+		s.Burning = true
+		return s, nil
+	case !s.Burning:
+		return s, nil
+	}
+	s.Burning = false
+	if s.Firing && s.Streak >= t.Successes {
+		return State{}, recovery(check, at, s)
+	}
+	return s, nil
+}
+
+// recovery returns the recovery notice ending s's incident.
+func recovery(check string, at time.Time, s State) *Notification {
+	return &Notification{Kind: KindRecovery, Check: check, At: at, Since: s.FiringSince,
+		Until: s.StreakStart, Probes: s.Streak, Reason: s.LastReason, Error: s.LastError}
 }
 
 // Removed returns the notification for check, in state s, being removed from

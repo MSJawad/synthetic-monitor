@@ -287,6 +287,54 @@ func TestManagerDropsResultsWhenQueueIsFull(t *testing.T) {
 	})
 }
 
+func TestManagerBurnHoldsRecoveryUntilItClears(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, notifier := newMemStore(), &fakeNotifier{}
+		web := check("web")
+		web.SLO = &config.SLO{Target: 99.5, WindowDays: 30}
+		m := start(t, store, notifier, nil, web)
+
+		// A burn alone raises the alert, quoting the last failure.
+		feed(m, "web", "FSFS")
+		m.SetBurns(map[string]*Burn{"web": {Failed: 2, Total: 4, Window: time.Hour, Since: time.Now()}})
+		synctest.Wait()
+		if got := notifier.kinds(); got != "alert" || notifier.delivered[0].Burn == nil || notifier.delivered[0].Reason != probe.ReasonConnect {
+			t.Fatalf("after a burn: delivered %s %+v; want one burn alert naming the last failure", got, notifier.delivered)
+		}
+
+		// Recovered probes don't end it while the budget is still burning,
+		// nor when an evaluation leaves the check out.
+		feed(m, "web", "SSS")
+		m.SetBurns(map[string]*Burn{})
+		synctest.Wait()
+		if got := notifier.kinds(); got != "alert" {
+			t.Fatalf("still burning: delivered %s; want no recovery yet", got)
+		}
+
+		m.SetBurns(map[string]*Burn{"web": nil})
+		synctest.Wait()
+		if got := notifier.kinds(); got != "alert,recovery" || len(store.states) != 0 {
+			t.Errorf("burn cleared: delivered %s, %d states; want the recovery and no state", got, len(store.states))
+		}
+		closeManager(t, m)
+	})
+}
+
+func TestManagerClearsBurnOfCheckWithoutSLO(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Saved while the check had an SLO, which the config since dropped.
+		store, notifier := newMemStore(), &fakeNotifier{}
+		store.states["web"] = State{Firing: true, Burning: true, FiringSince: time.Now(), Streak: 2}
+		m := start(t, store, notifier, nil, check("web"))
+		m.SetBurns(map[string]*Burn{})
+		synctest.Wait()
+		if got := notifier.kinds(); got != "recovery" {
+			t.Errorf("delivered %s; want the recovery the burn was holding", got)
+		}
+		closeManager(t, m)
+	})
+}
+
 func TestBackoff(t *testing.T) {
 	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
 	for i, w := range want {

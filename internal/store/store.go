@@ -106,6 +106,9 @@ var migrations = []string{
 		check_name TEXT    PRIMARY KEY,
 		last_ping  INTEGER NOT NULL -- Unix milliseconds
 	) STRICT, WITHOUT ROWID;`,
+
+	`-- 1 while an error budget burn rule fires for the check.
+	ALTER TABLE alert_state ADD COLUMN burning INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // Open opens or creates the database at path, applies pending migrations,

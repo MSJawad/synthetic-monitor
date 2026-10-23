@@ -2,6 +2,7 @@ package alert
 
 import (
 	"errors"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -122,5 +123,125 @@ func TestStateEqualIgnoresClockReadings(t *testing.T) {
 	}
 	if a.Equal(State{Streak: 2, StreakStart: now}) {
 		t.Error("states with different streaks are Equal")
+	}
+}
+
+var burn = &Burn{Failed: 20, Total: 120, Window: time.Hour, Rate: 33.3, Since: t0}
+
+func TestNextBurnRaisesAnAlert(t *testing.T) {
+	s := State{LastReason: probe.ReasonHTTPStatus, LastError: "status 500, want 2xx"}
+	at := t0.Add(10 * time.Minute)
+	next, n := NextBurn(s, "web", burn, at, Thresholds{3, 2})
+	if !next.Firing || !next.Burning || !next.FiringSince.Equal(t0) {
+		t.Errorf("state = %+v; want firing and burning since the first failure", next)
+	}
+	if n == nil || n.Kind != KindAlert || n.Burn != burn || !n.At.Equal(at) || !n.Since.Equal(t0) ||
+		n.Reason != probe.ReasonHTTPStatus {
+		t.Errorf("notification = %+v; want an alert carrying the burn and the latest failure", n)
+	}
+
+	// Already firing: the burn is noted, and nothing is sent.
+	firing := State{Firing: true, FiringSince: t0}
+	if next, n := NextBurn(firing, "web", burn, at, Thresholds{3, 2}); n != nil || !next.Burning {
+		t.Errorf("firing check: state %+v, notification %+v; want burning and nothing sent", next, n)
+	}
+	// Not burning, and wasn't: nothing changes.
+	if next, n := NextBurn(firing, "web", nil, at, Thresholds{3, 2}); n != nil || !next.Equal(firing) {
+		t.Errorf("no burn: state %+v, notification %+v; want no change", next, n)
+	}
+}
+
+func TestBurningHoldsTheRecoveryUntilItClears(t *testing.T) {
+	th := Thresholds{3, 2}
+	var s State
+	var n *Notification
+	for i, fail := range []bool{true, true, true} { // alert on the third failure
+		s, _ = Next(s, probeAt(i, fail), th)
+	}
+	s, _ = NextBurn(s, "web", burn, probeAt(3, false).Start, th)
+	for i := 4; i < 8; i++ { // four successes: enough to recover, but burning
+		if s, n = Next(s, probeAt(i, false), th); n != nil {
+			t.Fatalf("probe %d sent %+v while burning; want the recovery held", i, n)
+		}
+	}
+	at := probeAt(8, false).Start
+	s, n = NextBurn(s, "web", nil, at, th)
+	if n == nil || n.Kind != KindRecovery || !n.Until.Equal(probeAt(4, false).Start) || !n.At.Equal(at) || !s.IsZero() {
+		t.Errorf("burn cleared: state %+v, notification %+v; want the held recovery, back since probe 4", s, n)
+	}
+
+	// A burn that clears before the probes recover only lifts the hold.
+	s = State{Firing: true, Burning: true, FiringSince: t0}
+	if s, n = NextBurn(s, "web", nil, at, th); n != nil || !s.Firing || s.Burning {
+		t.Errorf("burn cleared while failing: state %+v, notification %+v; want still firing, nothing sent", s, n)
+	}
+}
+
+// TestFlappingIsOneIncident replays a check failing half its probes at
+// random, as one of two replicas would, for 30 minutes, then recovering. On
+// failures in a row alone it alerts and recovers over and over; with the
+// fast burn rule (2% of a 30-day 99.5% budget in an hour, still burning over
+// 5 minutes) it is one incident.
+func TestFlappingIsOneIncident(t *testing.T) {
+	const (
+		flaky     = 60  // probes, 30s apart: 30 minutes failing at random
+		after     = 40  // then 20 minutes healthy
+		threshold = 7.2 // % of probes failing that burns at 14.4x for 99.5%
+	)
+	rng := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // the replay must be the same every run
+	th := Thresholds{3, 2}
+	var (
+		failed               []bool
+		plain, withBurn      State
+		plainSent, burnsSent string
+	)
+	rate := func(last int) float64 { // % of the last probes that failed
+		window := failed[max(len(failed)-last, 0):]
+		n := 0
+		for _, f := range window {
+			if f {
+				n++
+			}
+		}
+		return 100 * float64(n) / float64(len(window))
+	}
+	record := func(sent *string, n *Notification) {
+		if n != nil {
+			*sent += string(n.Kind[0])
+		}
+	}
+	for i := range flaky + after {
+		fail := i < flaky && rng.IntN(2) == 0
+		failed = append(failed, fail)
+		r := probeAt(i, fail)
+
+		var n *Notification
+		plain, n = Next(plain, r, th)
+		record(&plainSent, n)
+		withBurn, n = Next(withBurn, r, th)
+		record(&burnsSent, n)
+
+		var b *Burn
+		if rate(120) >= threshold && rate(10) >= threshold {
+			b = &Burn{Window: time.Hour, Since: t0}
+		}
+		withBurn, n = NextBurn(withBurn, "web", b, r.Start, th)
+		record(&burnsSent, n)
+	}
+	if len(plainSent) < 4 {
+		t.Errorf("failures in a row alone sent %q; the replay should show it flapping", plainSent)
+	}
+	if burnsSent != "ar" {
+		t.Errorf("with the burn rule, sent %q; want one alert and one recovery", burnsSent)
+	}
+}
+
+func TestRenderBurnAlert(t *testing.T) {
+	n := Notification{Kind: KindAlert, Check: "web", Burn: burn, Reason: probe.ReasonHTTPStatus, Error: "status 500, want 2xx"}
+	title, body, priority, _ := render(n)
+	want := "20 of the 120 probes in the last hour failed, the first at 2026-10-21 14:00:00 UTC. " +
+		"That spends the error budget 33 times as fast as the SLO allows.\nLatest failure (http_status): status 500, want 2xx"
+	if title != "web is failing on and off" || body != want || priority != "high" {
+		t.Errorf("render = %q, %q, %q", title, body, priority)
 	}
 }

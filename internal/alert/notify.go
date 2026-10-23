@@ -108,6 +108,15 @@ func (nt *Ntfy) Notify(ctx context.Context, n Notification) error {
 func render(n Notification) (title, body, priority, tags string) {
 	switch n.Kind {
 	case KindAlert:
+		if b := n.Burn; b != nil {
+			body = fmt.Sprintf("%d of the %d probes in the last %s failed, the first at %s. "+
+				"That spends the error budget %.0f times as fast as the SLO allows.",
+				b.Failed, b.Total, window(b.Window), stamp(b.Since), b.Rate)
+			if n.Reason != "" {
+				body += fmt.Sprintf("\nLatest failure (%s): %s", n.Reason, n.Error)
+			}
+			return n.Check + " is failing on and off", body, "high", "rotating_light"
+		}
 		return n.Check + " is failing",
 			fmt.Sprintf("%d probes in a row have failed, the first at %s.\nLatest failure (%s): %s",
 				n.Probes, stamp(n.Since), n.Reason, n.Error),
@@ -124,6 +133,17 @@ func render(n Notification) (title, body, priority, tags string) {
 			"default", "wastebasket"
 	}
 	return n.Check + ": " + string(n.Kind), "", "default", ""
+}
+
+// window names a burn window to follow "in the last": "hour", "6 hours".
+func window(d time.Duration) string {
+	switch {
+	case d == time.Hour:
+		return "hour"
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%d hours", d/time.Hour)
+	}
+	return fmt.Sprintf("%d minutes", d/time.Minute)
 }
 
 func stamp(t time.Time) string {

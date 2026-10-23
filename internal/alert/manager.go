@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/MSJawad/synthetic-monitor/internal/config"
+	"github.com/MSJawad/synthetic-monitor/internal/probe"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
 )
 
@@ -90,6 +91,11 @@ type Manager struct {
 	// Owned by the evaluating goroutine once it starts.
 	states     map[string]State
 	thresholds map[string]Thresholds
+	// hasSLO records which checks have an SLO, and so are burn-evaluated.
+	hasSLO map[string]bool
+	// lastFailure is each check's most recent failure, for a burn alert
+	// raised when the check's state no longer holds one.
+	lastFailure map[string]failure
 
 	// firing mirrors which checks are firing, and since when, for readers
 	// on other goroutines.
@@ -97,13 +103,21 @@ type Manager struct {
 	firing   map[string]time.Time
 }
 
-// event is one thing for the evaluating goroutine to apply. Results and
-// config changes share a queue so they are applied in the order they
-// happened.
+type failure struct {
+	reason probe.Reason
+	err    string
+}
+
+// event is one thing for the evaluating goroutine to apply. Results, burn
+// evaluations and config changes share a queue so they are applied in the
+// order they happened.
 type event struct {
 	result   *scheduler.Result
 	isConfig bool
 	checks   []config.Check // when isConfig
+	isBurns  bool
+	burns    map[string]*Burn // when isBurns
+	at       time.Time        // when isBurns
 	forget   string
 }
 
@@ -127,15 +141,17 @@ func New(ctx context.Context, store Store, checks []config.Check, opts Options) 
 	}
 	m := &Manager{
 		store: store, notifier: opts.Notifier, observer: opts.Observer, logger: opts.Logger,
-		events:     make(chan event, opts.QueueSize),
-		wake:       make(chan struct{}, 1),
-		stopEval:   make(chan struct{}),
-		evalDone:   make(chan struct{}),
-		draining:   make(chan struct{}),
-		sendDone:   make(chan struct{}),
-		states:     states,
-		thresholds: make(map[string]Thresholds),
-		firing:     make(map[string]time.Time),
+		events:      make(chan event, opts.QueueSize),
+		wake:        make(chan struct{}, 1),
+		stopEval:    make(chan struct{}),
+		evalDone:    make(chan struct{}),
+		draining:    make(chan struct{}),
+		sendDone:    make(chan struct{}),
+		states:      states,
+		thresholds:  make(map[string]Thresholds),
+		hasSLO:      make(map[string]bool),
+		lastFailure: make(map[string]failure),
+		firing:      make(map[string]time.Time),
 	}
 	m.setChecks(checks)
 
@@ -173,14 +189,21 @@ func (m *Manager) SetChecks(checks []config.Check) {
 	m.enqueue(event{isConfig: true, checks: checks})
 }
 
+// SetBurns applies an SLO evaluation: for each check evaluated, the burn
+// rule that fires, or nil if none does. A check with an SLO that is left
+// out, as when its probes couldn't be counted, keeps its state.
+func (m *Manager) SetBurns(burns map[string]*Burn) {
+	m.enqueue(event{isBurns: true, burns: burns, at: time.Now()})
+}
+
 // Forget drops a removed check's state once its last probe has been
 // recorded, sending a removal notice if its alert was firing.
 func (m *Manager) Forget(check string) {
 	m.enqueue(event{forget: check})
 }
 
-// enqueue queues a config change, waiting for room: unlike results, these
-// must not be dropped. It gives up once evaluation has stopped.
+// enqueue queues a config change or burn evaluation, waiting for room:
+// unlike results, these must not be dropped. It gives up once evaluation has stopped.
 func (m *Manager) enqueue(e event) {
 	select {
 	case m.events <- e:
@@ -233,6 +256,8 @@ func (m *Manager) apply(ctx context.Context, e event) {
 		m.evaluateResult(ctx, *e.result)
 	case e.isConfig:
 		m.setChecks(e.checks)
+	case e.isBurns:
+		m.evaluateBurns(ctx, e.burns, e.at)
 	default:
 		m.forget(ctx, e.forget)
 	}
@@ -243,18 +268,44 @@ func (m *Manager) evaluateResult(ctx context.Context, r scheduler.Result) {
 	if !ok {
 		return // the check has been forgotten
 	}
+	if !r.OK() {
+		m.lastFailure[r.Check] = failure{r.Reason, errorText(r)}
+	}
 	prev := m.states[r.Check]
 	next, n := Next(prev, r, t)
+	m.save(ctx, r.Check, prev, next, n)
+}
+
+func (m *Manager) evaluateBurns(ctx context.Context, burns map[string]*Burn, at time.Time) {
+	for check, t := range m.thresholds {
+		b, evaluated := burns[check]
+		if !evaluated && m.hasSLO[check] {
+			continue
+		}
+		prev := m.states[check]
+		in := prev
+		if b != nil && in.LastReason == "" {
+			f := m.lastFailure[check]
+			in.LastReason, in.LastError = f.reason, f.err
+		}
+		next, n := NextBurn(in, check, b, at, t)
+		m.save(ctx, check, prev, next, n)
+	}
+}
+
+// save stores a check's change of state and the notification it calls
+// for, if anything changed.
+func (m *Manager) save(ctx context.Context, check string, prev, next State, n *Notification) {
 	if n == nil && next.Equal(prev) {
 		return
 	}
-	if err := m.store.SaveAlertState(ctx, r.Check, next, n); err != nil {
-		// The in-memory state stays as it was, so the next result for this
-		// check makes the same transition and tries again.
-		m.logger.Error("saving alert state", "check", r.Check, "err", err)
+	if err := m.store.SaveAlertState(ctx, check, next, n); err != nil {
+		// The in-memory state stays as it was, so the next result or
+		// evaluation for this check makes the same transition and tries again.
+		m.logger.Error("saving alert state", "check", check, "err", err)
 		return
 	}
-	m.setState(r.Check, prev, next)
+	m.setState(check, prev, next)
 	if n != nil {
 		m.wakeSender()
 	}
@@ -263,11 +314,14 @@ func (m *Manager) evaluateResult(ctx context.Context, r scheduler.Result) {
 func (m *Manager) setChecks(checks []config.Check) {
 	for _, c := range checks {
 		m.thresholds[c.Name] = Thresholds{Failures: c.FailureThreshold, Successes: c.SuccessThreshold}
+		m.hasSLO[c.Name] = c.SLO != nil
 	}
 }
 
 func (m *Manager) forget(ctx context.Context, check string) {
 	delete(m.thresholds, check)
+	delete(m.hasSLO, check)
+	delete(m.lastFailure, check)
 	s, ok := m.states[check]
 	if !ok {
 		return
