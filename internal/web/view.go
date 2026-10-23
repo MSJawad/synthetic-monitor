@@ -44,6 +44,15 @@ func (s state) label() string {
 	return string(s)
 }
 
+// pageInput is everything known when the page renders.
+type pageInput struct {
+	checks []checkInput
+	// incidents are the configured checks' incidents over the days the
+	// page shows, newest first.
+	incidents            []store.Incident
+	incidentsUnavailable bool
+}
+
 // checkInput is everything known about one check when the page renders.
 type checkInput struct {
 	check       config.Check
@@ -52,7 +61,11 @@ type checkInput struct {
 	slo         *slo.Status
 	unavailable bool // history could not be read
 	lastPing    time.Time
-	pinged      bool // whether a heartbeat check has been pinged
+	pinged      bool             // whether a heartbeat check has been pinged
+	days        []store.Day      // daily totals over the days the page shows
+	incidents   []store.Incident // the check's, newest first
+	// daysUnavailable is true if the daily totals could not be read.
+	daysUnavailable bool
 }
 
 type pageView struct {
@@ -60,6 +73,13 @@ type pageView struct {
 	Headline  string
 	Generated string
 	Checks    []checkView
+	Incidents []incidentView // newest first, at most maxIncidents
+	// MoreIncidents counts the incidents left out of the list.
+	MoreIncidents        int
+	IncidentsUnavailable bool
+	// HistoryDays and NarrowDays are how many days of bars show on a wide
+	// and a narrow screen.
+	HistoryDays, NarrowDays int
 }
 
 type checkView struct {
@@ -75,6 +95,7 @@ type checkView struct {
 	Note      string // why the last probe failed
 	Spark     sparkline
 	SLO       *sloView
+	History   historyView
 	Probes    []probeRow // newest first
 }
 
@@ -100,15 +121,18 @@ type probeRow struct {
 	Latency string
 }
 
-func buildPage(inputs []checkInput, now time.Time) pageView {
-	p := pageView{Generated: now.UTC().Format("15:04:05 MST")}
+func buildPage(in pageInput, now time.Time) pageView {
+	p := pageView{Generated: now.UTC().Format("15:04:05 MST"), HistoryDays: historyDays, NarrowDays: narrowDays,
+		IncidentsUnavailable: in.incidentsUnavailable}
 	counts := make(map[state]int)
-	for _, in := range inputs {
-		v := buildCheck(in, now)
+	for _, c := range in.checks {
+		v := buildCheck(c, now)
 		counts[v.State]++
 		p.Checks = append(p.Checks, v)
 	}
-	p.State, p.Headline = headline(counts, len(inputs))
+	p.State, p.Headline = headline(counts, len(in.checks))
+	listed := in.incidents[:min(len(in.incidents), maxIncidents)]
+	p.Incidents, p.MoreIncidents = buildIncidents(listed), len(in.incidents)-len(listed)
 	return p
 }
 
@@ -135,6 +159,8 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 	if in.slo != nil && in.check.SLO != nil {
 		v.SLO = buildSLO(*in.slo, *in.check.SLO, now)
 	}
+	v.History = buildHistory(in.days, in.incidents, now)
+	v.History.Unavailable = in.daysUnavailable
 	if in.unavailable {
 		v.Checked = "History unavailable"
 		return v

@@ -254,12 +254,14 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	var slos atomic.Pointer[map[string]slo.Status]
 	slos.Store(&map[string]slo.Status{})
 	status := web.Handler(web.Source{
-		Version:  version,
-		Checks:   func() []config.Check { return current.Load().Checks },
-		Recent:   s.history.Recent,
-		SLOs:     func() map[string]slo.Status { return *slos.Load() },
-		Firing:   alerts.Firing,
-		LastPing: pings.LastPing,
+		Version:   version,
+		Checks:    func() []config.Check { return current.Load().Checks },
+		Recent:    s.history.Recent,
+		SLOs:      func() map[string]slo.Status { return *slos.Load() },
+		Firing:    alerts.Firing,
+		LastPing:  pings.LastPing,
+		Days:      s.history.Days,
+		Incidents: s.history.Incidents,
 	}, logger)
 	var heartbeats http.Handler
 	if s.heartbeatToken != "" {

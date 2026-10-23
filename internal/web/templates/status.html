@@ -74,6 +74,27 @@
         </section>
       </div>
 
+      {{- with .History}}
+      <section class="history">
+        <div class="history-head">
+          <h3 class="metric-label"><span class="wide">Last {{$.HistoryDays}} days</span><span class="narrow">Last {{$.NarrowDays}} days</span></h3>
+          {{- if .Unavailable}}
+          <p class="history-uptime metric-none">History unavailable</p>
+          {{- else if .Uptime}}
+          <p class="history-uptime"><span class="wide">{{.Uptime}}</span><span class="narrow">{{.NarrowUptime}}</span> uptime</p>
+          {{- end}}
+        </div>
+        {{- if not .Unavailable}}
+        <ol class="days" role="img" aria-label="{{.Summary}}">
+          {{- range .Days}}
+          <li class="day{{if .Older}} older{{end}}" data-state="{{.State}}" title="{{.Title}}"></li>
+          {{- end}}
+        </ol>
+        <p class="history-axis"><span class="wide">{{$.HistoryDays}} days ago</span><span class="narrow">{{$.NarrowDays}} days ago</span><span>Today</span></p>
+        {{- end}}
+      </section>
+      {{- end}}
+
       {{- if .Probes}}
       <details class="probes">
         <summary>Recent probes</summary>
@@ -93,6 +114,33 @@
     <li class="check empty">No checks are configured.</li>
   {{- end}}
   </ul>
+
+  <section class="incidents">
+    <div class="incidents-head">
+      <h2 class="incidents-title">Incidents</h2>
+      <p class="incidents-span">Last {{.HistoryDays}} days</p>
+    </div>
+    {{- if .IncidentsUnavailable}}
+    <p class="incidents-none">Incidents unavailable</p>
+    {{- else}}
+    <ul class="incident-list">
+    {{- range .Incidents}}
+      <li class="incident" data-state="{{.State}}">
+        {{- template "icon" .State}}
+        <div class="incident-body">
+          <p class="incident-head"><span><span class="incident-check">{{.Check}}</span> {{.Label}}</span><span class="incident-lasted">{{.Lasted}}</span></p>
+          <p class="incident-meta">{{.When}}{{with .Cause}} · {{.}}{{end}}</p>
+        </div>
+      </li>
+    {{- else}}
+      <li class="incidents-none">No incidents recorded in the last {{.HistoryDays}} days.</li>
+    {{- end}}
+    </ul>
+    {{- with .MoreIncidents}}
+    <p class="incidents-more">{{.}} earlier not shown</p>
+    {{- end}}
+    {{- end}}
+  </section>
 
   <footer class="footer">Monitored by synthetic-monitor</footer>
 </main>

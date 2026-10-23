@@ -63,6 +63,12 @@ type Source struct {
 	// LastPing returns when a heartbeat check was last pinged. Nil means
 	// never.
 	LastPing func(check string) (time.Time, bool)
+	// Days returns a check's daily probe totals from the day containing
+	// since, oldest first.
+	Days func(ctx context.Context, check string, since time.Time) ([]store.Day, error)
+	// Incidents returns the incidents open or ended since a time, newest
+	// first.
+	Incidents func(ctx context.Context, since time.Time) ([]store.Incident, error)
 }
 
 type handler struct {
@@ -114,6 +120,9 @@ type apiStatus struct {
 	Status    state      `json:"status"`
 	Generated time.Time  `json:"generated"`
 	Checks    []apiCheck `json:"checks"`
+	// Incidents are those open or ended over the days the page shows,
+	// newest first.
+	Incidents []apiIncident `json:"incidents"`
 }
 
 type apiCheck struct {
@@ -124,6 +133,25 @@ type apiCheck struct {
 	LastPing     time.Time `json:"last_ping,omitzero"` // heartbeat checks only
 	LastProbe    *apiProbe `json:"last_probe,omitempty"`
 	SLO          *apiSLO   `json:"slo,omitempty"`
+	// Days are the daily probe totals over the days the page shows, oldest
+	// first; days without probes are left out.
+	Days []apiDay `json:"days"`
+}
+
+type apiDay struct {
+	Date   string `json:"date"` // in UTC, like 2026-10-21
+	Probes int    `json:"probes"`
+	Failed int    `json:"failed"`
+}
+
+type apiIncident struct {
+	Check string `json:"check"`
+	// Kind is "down" for an incident raised by failures in a row, or
+	// "flapping" for one raised by probes failing on and off.
+	Kind   string       `json:"kind"`
+	Start  time.Time    `json:"start"`
+	End    time.Time    `json:"end,omitzero"` // absent while the incident is open
+	Reason probe.Reason `json:"reason,omitempty"`
 }
 
 type apiProbe struct {
@@ -149,10 +177,14 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	inputs := h.inputs(r.Context())
 	now := h.now()
 	v := buildPage(inputs, now)
-	out := apiStatus{Version: h.src.Version, Status: v.State, Generated: now.UTC(), Checks: []apiCheck{}}
-	for i, in := range inputs {
+	out := apiStatus{Version: h.src.Version, Status: v.State, Generated: now.UTC(), Checks: []apiCheck{},
+		Incidents: []apiIncident{}}
+	for i, in := range inputs.checks {
 		c := apiCheck{Name: in.check.Name, Type: in.check.Type(), State: v.Checks[i].State,
-			FailingSince: in.firingSince.UTC(), LastPing: in.lastPing.UTC()}
+			FailingSince: in.firingSince.UTC(), LastPing: in.lastPing.UTC(), Days: []apiDay{}}
+		for _, d := range in.days {
+			c.Days = append(c.Days, apiDay{Date: d.Start.UTC().Format(time.DateOnly), Probes: d.Probes, Failed: d.Failed})
+		}
 		if n := len(in.samples); n > 0 {
 			last := in.samples[n-1]
 			c.LastProbe = &apiProbe{At: last.Start, OK: last.OK,
@@ -165,6 +197,14 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Checks = append(out.Checks, c)
 	}
+	for _, in := range inputs.incidents {
+		kind := "down"
+		if in.Burn {
+			kind = "flapping"
+		}
+		out.Incidents = append(out.Incidents, apiIncident{Check: in.Check, Kind: kind, Start: in.Start.UTC(),
+			End: in.End.UTC(), Reason: in.Reason})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if err := json.NewEncoder(w).Encode(out); err != nil {
@@ -173,10 +213,32 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 }
 
 // inputs gathers everything known about each configured check.
-func (h *handler) inputs(ctx context.Context) []checkInput {
+func (h *handler) inputs(ctx context.Context) pageInput {
 	slos, firing := h.src.SLOs(), h.src.Firing()
-	var inputs []checkInput
-	for _, c := range h.src.Checks() {
+	checks := h.src.Checks()
+	// The history starts at midnight on the first day shown.
+	since := midnight(h.now()).AddDate(0, 0, 1-historyDays)
+	var page pageInput
+	incidents, err := h.src.Incidents(ctx, since)
+	if err != nil {
+		h.logger.Error("reading incidents for the status page", "err", err)
+		page.incidentsUnavailable = true
+	}
+	byCheck := make(map[string][]store.Incident)
+	for _, in := range incidents {
+		byCheck[in.Check] = append(byCheck[in.Check], in)
+	}
+	configured := make(map[string]bool, len(checks))
+	for _, c := range checks {
+		configured[c.Name] = true
+	}
+	// Incidents of checks since removed from the config are left out.
+	for _, in := range incidents {
+		if configured[in.Check] {
+			page.incidents = append(page.incidents, in)
+		}
+	}
+	for _, c := range checks {
 		in := checkInput{check: c, firingSince: firing[c.Name]}
 		if c.Heartbeat != nil && h.src.LastPing != nil {
 			in.lastPing, in.pinged = h.src.LastPing(c.Name)
@@ -190,9 +252,15 @@ func (h *handler) inputs(ctx context.Context) []checkInput {
 			in.unavailable = true
 		}
 		in.samples = samples
-		inputs = append(inputs, in)
+		days, err := h.src.Days(ctx, c.Name, since)
+		if err != nil {
+			h.logger.Error("reading daily totals for the status page", "check", c.Name, "err", err)
+			in.daysUnavailable = true
+		}
+		in.days, in.incidents = days, byCheck[c.Name]
+		page.checks = append(page.checks, in)
 	}
-	return inputs
+	return page
 }
 
 // secure adds headers that stop the page being framed, sniffed or used to

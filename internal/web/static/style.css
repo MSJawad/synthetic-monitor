@@ -276,6 +276,176 @@ body {
 .probes .num { padding-right: 0; text-align: right; }
 .probes tr.failed td { font-weight: 600; }
 
+/* Daily history: a bar a day, oldest first. Incident days are colored by
+   the worst state of the day and underlined, so they stand out without
+   color too: red and green look alike to many colorblind people. */
+.history {
+  margin-top: 18px;
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-uptime {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-uptime.metric-none { font-size: 13px; }
+
+.days {
+  display: flex;
+  gap: 2px;
+  height: 28px;
+  margin: 8px 0 0;
+  padding: 0 0 6px;
+  box-sizing: content-box;
+  list-style: none;
+}
+
+.day {
+  position: relative;
+  flex: 1;
+  border-radius: 2px;
+  background: var(--state);
+}
+
+.day[data-state="pending"] { background: var(--hairline); }
+.day:hover { opacity: 0.7; }
+
+.day[data-state="down"]::after,
+.day[data-state="failing"]::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -6px;
+  left: 0;
+  height: 3px;
+  border-radius: 1px;
+  background: var(--state);
+}
+
+.history-axis {
+  display: flex;
+  justify-content: space-between;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+/* Only the last 30 days fit a phone (narrowDays); the label and uptime
+   follow. */
+.narrow { display: none; }
+
+@media (max-width: 600px) {
+  .day.older,
+  .wide { display: none; }
+  .narrow { display: inline; }
+}
+
+/* Incidents */
+.incidents {
+  margin-top: 32px;
+}
+
+.incidents-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.incidents-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.incidents-span {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.incident-list {
+  margin: 10px 0 0;
+  padding: 4px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  list-style: none;
+}
+
+.incident {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 0;
+}
+
+.incident + .incident { border-top: 1px solid var(--hairline); }
+.incident .icon { margin-top: 4px; }
+
+.incident-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The length sits on the name's line, aligned to its baseline. */
+.incident-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  font-size: 15px;
+}
+
+.incident-check {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.incident-meta {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.incident-lasted {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.incidents-none {
+  padding: 12px 0;
+  font-size: 15px;
+  color: var(--ink-2);
+}
+
+p.incidents-none { margin: 10px 0 0; }
+
+.incidents-more {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+@media (max-width: 600px) {
+  .incident-list { padding: 4px 16px; }
+}
+
 .footer {
   margin-top: 32px;
   font-size: 12px;

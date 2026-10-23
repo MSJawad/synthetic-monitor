@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -284,6 +285,23 @@ func fakeSource() Source {
 			// The alert manager keeps local times; the JSON must not.
 			return map[string]time.Time{"apartment-api": now.Add(-2 * time.Second).In(time.FixedZone("CEST", 2*60*60))}
 		},
+		Days: func(_ context.Context, check string, _ time.Time) ([]store.Day, error) {
+			if check == "broken" {
+				return nil, errors.New("database is locked")
+			}
+			return map[string][]store.Day{"apartment-api": {
+				{Start: midnight(now).AddDate(0, 0, -1), Probes: 1000, Failed: 40},
+				{Start: midnight(now), Probes: 1000, Failed: 2},
+			}}[check], nil
+		},
+		Incidents: func(context.Context, time.Time) ([]store.Incident, error) {
+			return []store.Incident{
+				{Check: "apartment-api", Start: now.Add(-2 * time.Second), Reason: probe.ReasonTimeout},
+				{Check: "removed", Start: now.Add(-time.Hour), End: now.Add(-50 * time.Minute)},
+				{Check: "apartment-api", Start: now.Add(-25 * time.Hour), End: now.Add(-24*time.Hour - 26*time.Minute),
+					Burn: true, Reason: probe.ReasonConnect},
+			}, nil
+		},
 	}
 }
 
@@ -318,6 +336,13 @@ func TestPage(t *testing.T) {
 		`Failed<span class="metric-aside">timed out</span>`,
 		"<summary>Recent probes</summary>",
 		"History unavailable",
+		`<span class="wide">Last 90 days</span><span class="narrow">Last 30 days</span>`,
+		`<span class="wide">97.9%</span><span class="narrow">97.9%</span> uptime`,
+		`<li class="day" data-state="down" title="Today: 99.8% up, down for 2s"></li>`,
+		`<span class="incident-check">apartment-api</span> Down</span>`,
+		`<p class="incident-meta">Since Oct 21, 14:59 UTC · Timed out</p>`,
+		`<p class="incident-meta">Oct 20, 14:00 to 14:34 UTC · Connection failed</p>`,
+		`<span class="incident-lasted">34m</span>`,
 		`href="` + cssURL + `"`,
 	} {
 		if !strings.Contains(page, want) {
@@ -325,7 +350,7 @@ func TestPage(t *testing.T) {
 		}
 	}
 	// Targets and raw errors can reveal internal hosts; the page shows neither.
-	for _, leak := range []string{"internal.example", "10.0.0.7", "database is locked", "<script"} {
+	for _, leak := range []string{"internal.example", "10.0.0.7", "database is locked", "<script", "removed"} {
 		if strings.Contains(page, leak) {
 			t.Errorf("page contains %q", leak)
 		}
@@ -359,6 +384,19 @@ func TestAPI(t *testing.T) {
 	}
 	if cache := got.Checks[1]; cache.State != stateUp || cache.SLO != nil || !cache.FailingSince.IsZero() {
 		t.Errorf("cache = %+v, want up without an SLO", cache)
+	}
+	if days := api.Days; len(days) != 2 || days[0] != (apiDay{Date: "2026-10-20", Probes: 1000, Failed: 40}) {
+		t.Errorf("apartment-api days = %+v, want yesterday's and today's totals", days)
+	}
+	want := []apiIncident{
+		{Check: "apartment-api", Kind: "down", Start: now.Add(-2 * time.Second), Reason: probe.ReasonTimeout},
+		{Check: "apartment-api", Kind: "flapping", Start: now.Add(-25 * time.Hour), End: now.Add(-24*time.Hour - 26*time.Minute),
+			Reason: probe.ReasonConnect},
+	}
+	if !slices.EqualFunc(got.Incidents, want, func(a, b apiIncident) bool {
+		return a.Check == b.Check && a.Kind == b.Kind && a.Start.Equal(b.Start) && a.End.Equal(b.End) && a.Reason == b.Reason
+	}) {
+		t.Errorf("incidents = %+v, want %+v: the configured checks', the open one without an end", got.Incidents, want)
 	}
 }
 
