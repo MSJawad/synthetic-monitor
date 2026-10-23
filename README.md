@@ -3,7 +3,8 @@
 A synthetic monitor I wrote in Go. It checks your services from the outside
 on a schedule, the way a user would, and sends you an alert when something
 breaks and another when it's back. It also tracks uptime against an SLO and
-puts it all on a status page.
+puts it all on a status page, with the last 90 days and every incident in
+them.
 
 It's running right now at https://status.92-5-186-10.sslip.io, keeping an
 eye on my [apartment-finder](https://github.com/MSJawad/apartment-finder)
@@ -26,9 +27,9 @@ flowchart TB
   scheduler -- "saves every<br/>result" --> db[("SQLite")]
   scheduler -- "passes every<br/>result" --> alerts["alert manager"]
   scheduler -- "counts and<br/>latencies" --> metrics["/metrics"]
-  alerts -- "alert state and<br/>unsent alerts" --> db
+  alerts -- "incidents and<br/>unsent alerts" --> db
   alerts -- "down and<br/>recovered" --> ntfy(["ntfy"])
-  db -- "recent<br/>results" --> web["status page"]
+  db -- "results and<br/>incidents" --> web["status page"]
   db -- "results in<br/>the SLO window" --> slo["SLO calculator"]
   slo -- "availability,<br/>error budget" --> web
   slo -- "SLO numbers" --> metrics
@@ -151,6 +152,10 @@ how I measured them and where the CPU goes are in
   handshake, the same as a new visitor.
 - SLOs are worked out from its own history, over the last 30 days by
   default.
+- The status page has a bar for each of the last 90 days: red if the check
+  was down that day, amber if it was failing on and off. Below that is a
+  list of the incidents. Probe results are only kept for 35 days, so it
+  keeps a count of each day's probes for the bars.
 - History lives in SQLite. At this scale it's plenty, and there's no
   database to run. Why not Postgres or a time-series database is in
   [docs/decisions.md](docs/decisions.md#history-in-sqlite-not-postgres-or-a-time-series-database),

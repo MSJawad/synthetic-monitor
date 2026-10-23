@@ -151,7 +151,9 @@ blocked when it ends, which complements goleak.
 
 Every probe result is kept for the retention period (35 days by default) in
 an embedded SQLite database: it is what the status page shows and what SLOs
-are computed from.
+are computed from. The status page's 90 days of history come from daily
+totals and recorded incidents, kept alongside
+([below](#90-days-of-history-from-daily-totals-and-recorded-incidents)).
 
 The scale decides it. Twenty checks every 30 seconds is under one write a
 second and about 1.7 million rows a month, a few hundred megabytes. The
@@ -316,13 +318,13 @@ monitor was down, which are resolved at the next start.
 ## The status page is server-rendered and runs no JavaScript
 
 The page is an `html/template` embedded in the binary. Charts are inline SVG
-computed on the server, tooltips are SVG `<title>` elements, and the page
-reloads itself every 30 seconds. Without scripts there is nothing to build or
+computed on the server, tooltips are plain `title`s, and the page reloads
+itself every 30 seconds. Without scripts there is nothing to build or
 bundle, it works with JavaScript disabled, and its Content-Security-Policy
 can forbid scripts and inline styles outright, which removes cross-site
 scripting as a class of bug. The cost is a full reload to refresh and plain
-browser tooltips; every value is also in a "Recent probes" table, so nothing
-is reachable only by hovering.
+browser tooltips; every value is also in a table ("Recent probes", "Daily
+uptime"), so nothing is reachable only by hovering, which phones can't do.
 
 It shows check names, never their targets or raw error messages, because a
 public status page should not reveal internal hostnames and addresses.
@@ -341,6 +343,44 @@ A few details that are easy to get wrong:
 - Colours come from a palette validated for colour-vision deficiency in both
   light and dark mode, and status colours always come with an icon and a
   label, never colour alone.
+
+## 90 days of history from daily totals and recorded incidents
+
+Each check on the status page has a bar for each of the last 90 days, and
+below the checks is a list of the incidents in those days. Neither was
+possible from what was stored before.
+
+**Daily totals.** Probe results are kept 35 days, as long as the SLO
+windows need. Instead of keeping them for 90, a `daily` table holds each
+check's probes and failures per UTC day, and is kept 90 days. A trigger on
+`results` counts each result into its day in the transaction that writes
+it, so the totals can't drift from the results, and the migration that
+added the table counted the results already there. Counting costs the
+writer about 28% (from 190,000 to 138,000 results a second on a laptop),
+still far beyond what probes produce. Keeping 90 days of results instead
+would make the database 2.5 times bigger and have every page view count a
+quarter of a million rows per check.
+
+**Incidents.** Nothing remembered past incidents: a notification is
+deleted once it's delivered, and alert state only describes the present.
+An `incidents` row is now opened by an alert and closed by its recovery or
+removal notice, in the same transaction as the alert state and the outbox,
+so the history always agrees with the alerts that went out. An incident
+ends when probes began succeeding again, not when the recovery notice went
+out, which for a burn incident can be half an hour later. The row also
+records whether the burn rule raised it. That's how the page tells "down"
+from "failing on and off": a check that fails every probe burns its budget
+too, so whether it's burning doesn't tell. Incidents from before the table
+existed aren't recorded; checks firing at the time got an open one.
+
+**Colours.** A day's bar is red if the check was down at any point that
+day, amber if it was failing on and off, green if it was probed without an
+incident, and grey before it was probed. The colour follows incidents, not
+uptime, so it matches the alerts, and one failed probe doesn't turn a day
+amber; the day's uptime is in its tooltip and the table. The palette's red
+and green are nearly the same to deuteranopes (ΔE 4.1), so incident days
+are also underlined. Phones get the last 30 days, chosen by CSS, with the
+label and uptime to match.
 
 ## The image: a static binary on distroless
 

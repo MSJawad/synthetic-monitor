@@ -9,7 +9,7 @@ Everything you can set, every endpoint and every metric.
 | `-config` | (required) | checks file, see [`examples/checks.yaml`](../examples/checks.yaml) |
 | `-listen` | `:8080` | HTTP server address |
 | `-history` | `history.db` | SQLite file of probe results |
-| `-history-retention-days` | `35` | days of results kept; must cover every SLO window |
+| `-history-retention-days` | `35` | days of results kept; must cover every SLO window. Daily totals and incidents are kept 90 days either way |
 | `-max-concurrent-probes` | `64` | cap on probes in flight across all checks |
 | `-config-poll-interval` | `5s` | how often the checks file is checked for changes |
 | `-shutdown-timeout` | `30s` | how long probes in flight get to finish after SIGTERM |
@@ -40,7 +40,7 @@ exits.
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | status page |
-| `GET /api/status` | the status page's data as JSON, with the running build's `version` (its commit) |
+| `GET /api/status` | the status page's data as JSON: each check's state, last probe, SLO and daily totals, the incidents of the last 90 days, and the running build's `version` (its commit) |
 | `GET /metrics` | Prometheus metrics |
 | `GET /healthz` | liveness: the process is up |
 | `GET /readyz` | readiness: `503` once shutdown has started |
