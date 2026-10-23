@@ -505,7 +505,7 @@
       "id": 6,
       "type": "table",
       "title": "SLOs",
-      "description": "Each check's availability over its own SLO window (or since its first probe, while its history is shorter), against its target.",
+      "description": "Each check's availability over its own SLO window (or since its first probe, while its history is shorter), against its target, and how fast its error budget burned over the last hour: 1× would spend it exactly over the window. For a 30-day SLO, 14.4× over the last hour and the last 5 minutes raises an alert.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -549,6 +549,17 @@
           "range": false,
           "instant": true,
           "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "D",
+          "expr": "max by (check) (synthetic_slo_burn_rate{check=~\"$check\", window=\"1h\"})",
+          "range": false,
+          "instant": true,
+          "format": "table"
         }
       ],
       "transformations": [
@@ -566,13 +577,15 @@
               "check": 0,
               "Value #A": 1,
               "Value #B": 2,
-              "Value #C": 3
+              "Value #C": 3,
+              "Value #D": 4
             },
             "renameByName": {
               "check": "Check",
               "Value #A": "Target",
               "Value #B": "Availability",
-              "Value #C": "Error budget left"
+              "Value #C": "Error budget left",
+              "Value #D": "Burn rate, last hour"
             }
           }
         },
@@ -708,6 +721,22 @@
                 "value": {
                   "type": "color-text"
                 }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Burn rate, last hour"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:×"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           }

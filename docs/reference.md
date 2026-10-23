@@ -63,6 +63,7 @@ Per-check series are labelled only with `check`; join on
 | `synthetic_slo_target_ratio{check}` | gauge | SLO target, e.g. `0.995` |
 | `synthetic_slo_availability_ratio{check}` | gauge | fraction of probes in the SLO window that succeeded |
 | `synthetic_slo_error_budget_remaining_ratio{check}` | gauge | error budget left; negative once overspent |
+| `synthetic_slo_burn_rate{check,window}` | gauge | how fast the error budget was spent over `window` (`5m`, `30m`, `1h`, `6h`); 1 would spend exactly all of it over the SLO window |
 | `synthetic_scheduler_lag_seconds` | histogram | how late probes started, mostly waiting for a free slot |
 | `synthetic_scheduler_skipped_runs_total{check}` | counter | runs skipped because an earlier probe overran |
 | `synthetic_probes_in_flight` | gauge | probes running now |

@@ -243,9 +243,39 @@ match the Kubernetes probe fields with the same meaning. The transition
 logic is a pure function, tested by replaying sequences such as
 `FFFSFSFSFSS`.
 
-The trade-off of counting consecutive probes is that a target failing two
-probes in every three never alerts. That pattern shows up in the SLO and its
-error budget instead.
+Counting consecutive probes alone has a blind spot: a target failing at
+random, as when one of two replicas is broken, either never fails enough in
+a row to alert or alerts and recovers over and over. The next entry covers
+the second way into an incident that closes it.
+
+## A second way into an incident: the error budget burning too fast
+
+A check with an SLO also alerts when its error budget is being spent too
+fast, using the two paging rules from Google's SRE workbook:
+
+- **Fast:** failures that would spend 2% of the window's budget in an hour,
+  and are still that frequent over the last 5 minutes. For a 99.5% target
+  over 30 days that is more than 7.2% of probes failing, a burn rate of 14.4.
+- **Slow:** 5% of the budget in 6 hours, still burning over the last 30
+  minutes: more than 3% of probes failing, a burn rate of 6.
+
+The long window keeps a bad minute from paging anyone. The short window
+makes the alert clear soon after the failures stop. The thresholds follow
+from the SLO, scaled to its window, so they need no tuning per check. A rule
+also needs `failure_threshold` failures in its long window, so one failure of
+a check probed hourly, a 100% failure rate on paper, can't page anyone.
+
+Both triggers feed one incident: it starts on either, and ends only once
+`success_threshold` probes in a row pass and no burn rule fires. So a check
+failing half its probes at random is one alert and one recovery, not a
+stream of both. The alternative, a separate burn alert, would have left the
+consecutive-failure alert flapping beside it.
+
+The cost is a later recovery notice. While a rule fires, the incident stays
+open until its short window is clean, so the notice can come up to 30
+minutes after the check is healthy again. It says when probes started
+passing, so the real recovery time isn't lost. The burning flag is saved with
+the rest of the alert state, so a restart doesn't end an incident early.
 
 ## Notifications go through an outbox
 

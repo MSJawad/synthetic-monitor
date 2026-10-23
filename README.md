@@ -141,6 +141,10 @@ how I measured them and where the CPU goes are in
 - It alerts after 3 failures in a row and sends a recovery after 2 passes in
   a row, so one blip doesn't page anyone. Both numbers can be changed per
   check.
+- Checks with an SLO also alert when failures keep coming often enough to
+  burn through the error budget too fast, like half the probes failing on
+  and off. That's still one alert, and the recovery waits until the budget
+  has stopped burning.
 - Alerts are saved before they're sent, and it keeps retrying until ntfy
   takes them, so a restart in the middle of an incident won't lose one.
 - Every probe opens a fresh connection, with its own DNS lookup and TLS
