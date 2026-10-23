@@ -89,11 +89,23 @@ func TestDownSince(t *testing.T) {
 	if got := buildCheck(in, now).Since; got != "Incident began Oct 20 09:00 UTC, 30h ago" {
 		t.Errorf("Since while recovering = %q", got)
 	}
-	// Held open by a burning error budget, whatever the last probe did.
+	// A check that fails in a row burns its error budget too, but it's
+	// down, not failing on and off.
+	in.samples = []store.Sample{sample(time.Second, false)}
 	in.check.SLO = &config.SLO{Target: 99.5, WindowDays: 30}
 	in.slo = &slo.Status{Window: 30 * 24 * time.Hour, Burning: &slo.Burn{Rule: slo.BurnRules[0]}}
-	if got := buildCheck(in, now).Since; got != "Failing on and off since Oct 20 09:00 UTC, 30h ago" {
-		t.Errorf("Since while burning = %q", got)
+	in.incidents = []store.Incident{{Check: "web", Start: in.firingSince},
+		{Check: "web", Start: now.Add(-50 * time.Hour), End: now.Add(-49 * time.Hour), Burn: true}}
+	if got := buildCheck(in, now).Since; got != "Down since Oct 20 09:00 UTC, 30h ago" {
+		t.Errorf("Since while down and burning = %q", got)
+	}
+	// Raised by a burning error budget, whatever the last probe did.
+	in.incidents[0].Burn = true
+	for _, ok := range []bool{false, true} {
+		in.samples = []store.Sample{sample(time.Second, ok)}
+		if got := buildCheck(in, now).Since; got != "Failing on and off since Oct 20 09:00 UTC, 30h ago" {
+			t.Errorf("Since while failing on and off, last probe ok %t = %q", ok, got)
+		}
 	}
 }
 

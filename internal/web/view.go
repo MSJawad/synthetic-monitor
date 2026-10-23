@@ -184,9 +184,9 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 	}
 	since := clock(in.firingSince, now) + ", " + ago(now.Sub(in.firingSince))
 	switch {
-	case firing && in.slo != nil && in.slo.Burning != nil:
-		// The incident lasts while the budget burns, so each probe's pass or
-		// fail says less than the pattern does.
+	case firing && flapping(in.incidents):
+		// Raised by the budget burning, the incident lasts while it burns,
+		// so each probe's pass or fail says less than the pattern does.
 		v.Since = "Failing on and off since " + since
 	case v.State == stateDown:
 		v.Since = "Down since " + since
@@ -222,6 +222,14 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 		v.Probes = append(v.Probes, row)
 	}
 	return v
+}
+
+// flapping reports whether a check's open incident, if it has one, was
+// raised by probes failing on and off rather than failing in a row. A
+// check that is down burns its error budget too, so whether it burns now
+// doesn't tell.
+func flapping(incidents []store.Incident) bool {
+	return len(incidents) > 0 && incidents[0].End.IsZero() && incidents[0].Burn
 }
 
 func buildSLO(s slo.Status, c config.SLO, now time.Time) *sloView {
