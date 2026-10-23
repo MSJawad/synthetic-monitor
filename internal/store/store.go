@@ -34,8 +34,9 @@ const (
 	pruneChunk = 10000
 )
 
-// SummaryDays is how many days of incidents are kept, for the status
-// page's history; usually longer than the probe results themselves.
+// SummaryDays is how many days of incidents and daily totals are kept,
+// for the status page's history; usually longer than the probe results
+// themselves.
 const SummaryDays = 90
 
 // Options configures a Store.
@@ -126,6 +127,25 @@ var migrations = []string{
 	-- Checks firing when this table was added have an incident open already.
 	INSERT INTO incidents (check_name, started_at, burn, reason)
 		SELECT check_name, firing_since, burning, last_reason FROM alert_state WHERE firing = 1;`,
+
+	`-- Each check's probes and failures per day, kept longer than the
+	-- results they count.
+	CREATE TABLE daily (
+		check_name TEXT    NOT NULL,
+		day        INTEGER NOT NULL, -- Unix milliseconds of the day's midnight, UTC
+		probes     INTEGER NOT NULL,
+		failed     INTEGER NOT NULL,
+		PRIMARY KEY (check_name, day)
+	) STRICT, WITHOUT ROWID;
+	-- Counted in the transaction that writes each result, so the totals
+	-- always agree with the results.
+	CREATE TRIGGER results_count_daily AFTER INSERT ON results BEGIN
+		INSERT INTO daily VALUES (NEW.check_name, NEW.started_at - NEW.started_at % 86400000, 1, 1 - NEW.success)
+		ON CONFLICT (check_name, day) DO UPDATE SET probes = probes + 1, failed = failed + excluded.failed;
+	END;
+	INSERT INTO daily
+		SELECT check_name, started_at - started_at % 86400000 AS day, COUNT(*), SUM(1 - success)
+		FROM results GROUP BY check_name, day;`,
 }
 
 // Open opens or creates the database at path, applies pending migrations,
@@ -317,11 +337,14 @@ func (s *Store) write(ctx context.Context, batch []scheduler.Result) error {
 }
 
 // prune deletes results older than the retention, a chunk at a time, and
-// incidents that ended more than SummaryDays ago.
+// incidents and daily totals that ended more than SummaryDays ago.
 func (s *Store) prune(ctx context.Context) error {
 	now := time.Now()
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM incidents WHERE ended_at < ?`,
-		now.Add(-SummaryDays*24*time.Hour).UnixMilli()); err != nil {
+	summaryCutoff := now.Add(-SummaryDays * 24 * time.Hour).UnixMilli()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM incidents WHERE ended_at < ?`, summaryCutoff); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM daily WHERE day + 86400000 <= ?`, summaryCutoff); err != nil {
 		return err
 	}
 	cutoff := now.Add(-s.opts.Retention).UnixMilli()
