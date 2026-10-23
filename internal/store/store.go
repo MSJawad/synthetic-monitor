@@ -34,6 +34,10 @@ const (
 	pruneChunk = 10000
 )
 
+// SummaryDays is how many days of incidents are kept, for the status
+// page's history; usually longer than the probe results themselves.
+const SummaryDays = 90
+
 // Options configures a Store.
 type Options struct {
 	// Retention is how long results are kept. It must cover the longest
@@ -109,6 +113,19 @@ var migrations = []string{
 
 	`-- 1 while an error budget burn rule fires for the check.
 	ALTER TABLE alert_state ADD COLUMN burning INTEGER NOT NULL DEFAULT 0;`,
+
+	`-- One row per incident, opened by its alert and closed by its recovery
+	-- notice, or by the check's removal from the config.
+	CREATE TABLE incidents (
+		check_name TEXT    NOT NULL,
+		started_at INTEGER NOT NULL, -- Unix milliseconds: when the failures began
+		ended_at   INTEGER,          -- Unix milliseconds: when probes succeeded again; NULL while open
+		burn       INTEGER NOT NULL, -- 1 if an error budget burn rule raised it, 0 if failures in a row did
+		reason     TEXT    NOT NULL  -- the latest failure's reason when it was raised
+	) STRICT;
+	-- Checks firing when this table was added have an incident open already.
+	INSERT INTO incidents (check_name, started_at, burn, reason)
+		SELECT check_name, firing_since, burning, last_reason FROM alert_state WHERE firing = 1;`,
 }
 
 // Open opens or creates the database at path, applies pending migrations,
@@ -299,9 +316,15 @@ func (s *Store) write(ctx context.Context, batch []scheduler.Result) error {
 	return tx.Commit()
 }
 
-// prune deletes results older than the retention, a chunk at a time.
+// prune deletes results older than the retention, a chunk at a time, and
+// incidents that ended more than SummaryDays ago.
 func (s *Store) prune(ctx context.Context) error {
-	cutoff := time.Now().Add(-s.opts.Retention).UnixMilli()
+	now := time.Now()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM incidents WHERE ended_at < ?`,
+		now.Add(-SummaryDays*24*time.Hour).UnixMilli()); err != nil {
+		return err
+	}
+	cutoff := now.Add(-s.opts.Retention).UnixMilli()
 	for {
 		res, err := s.db.ExecContext(ctx, `DELETE FROM results WHERE rowid IN
 			(SELECT rowid FROM results WHERE started_at < ? LIMIT ?)`, cutoff, pruneChunk)

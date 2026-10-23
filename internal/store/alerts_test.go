@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,18 +59,22 @@ func TestHealthyStateDeletesRow(t *testing.T) {
 	}
 }
 
-func TestStateIsNotSavedWithoutItsNotification(t *testing.T) {
-	s := open(t, filepath.Join(t.TempDir(), "history.db"), Options{})
-	defer closeStore(t, s)
-	// Make adding to the outbox fail.
-	if _, err := s.db.ExecContext(t.Context(), "DROP TABLE notifications"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SaveAlertState(t.Context(), "web", firing, notice); err == nil {
-		t.Fatal("SaveAlertState succeeded without an outbox")
-	}
-	if states, err := s.AlertStates(t.Context()); err != nil || len(states) != 0 {
-		t.Errorf("states = %+v (%v): the state change was saved without its notification", states, err)
+func TestStateIsNotSavedWithoutItsNotificationAndIncident(t *testing.T) {
+	// Each makes one of the writes that go with a state change fail.
+	for _, drop := range []string{"DROP TABLE notifications", "DROP TABLE incidents"} {
+		t.Run(drop, func(t *testing.T) {
+			s := open(t, filepath.Join(t.TempDir(), "history.db"), Options{})
+			defer closeStore(t, s)
+			if _, err := s.db.ExecContext(t.Context(), drop); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SaveAlertState(t.Context(), "web", firing, notice); err == nil {
+				t.Fatal("SaveAlertState succeeded")
+			}
+			if states, err := s.AlertStates(t.Context()); err != nil || len(states) != 0 {
+				t.Errorf("states = %+v (%v): the state change was saved without everything that goes with it", states, err)
+			}
+		})
 	}
 }
 
@@ -99,26 +104,35 @@ func TestPendingNotificationsInOrder(t *testing.T) {
 	}
 }
 
-// TestUpgradeKeepsAlertState opens a database written before alert state
-// had a burning column, as production's was, holding a firing alert.
-func TestUpgradeKeepsAlertState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "history.db")
+// oldDatabase creates a database at path as the release whose schema had
+// only the first version migrations left it, then runs stmt with args.
+func oldDatabase(t *testing.T, path string, version int, stmt string, args ...any) {
+	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range migrations[:3] {
+	defer db.Close()
+	for _, m := range migrations[:version] {
 		if _, err := db.ExecContext(t.Context(), m); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.ExecContext(t.Context(), `PRAGMA user_version = 3;
-		INSERT INTO alert_state VALUES ('web', 1, 0, 0, ?, 'timeout', 'no result within 10s')`, since.UnixMilli()); err != nil {
+	// PRAGMA does not take parameters; version is a constant of the test.
+	if _, err := db.ExecContext(t.Context(), fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Close(); err != nil {
+	if _, err := db.ExecContext(t.Context(), stmt, args...); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestUpgradeKeepsAlertState opens a database written before alert state
+// had a burning column, holding a firing alert.
+func TestUpgradeKeepsAlertState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	oldDatabase(t, path, 3, `INSERT INTO alert_state VALUES ('web', 1, 0, 0, ?, 'timeout', 'no result within 10s')`,
+		since.UnixMilli())
 
 	s := open(t, path, Options{})
 	defer closeStore(t, s)
