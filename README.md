@@ -35,21 +35,24 @@ purpose. The page follows the viewer's light or dark preference.
 config:
   flowchart:
     useMaxWidth: false
+    nodeSpacing: 30
 ---
 flowchart TB
   watchdog["watchdog"]
-  scheduler["scheduler"] --> probes["probes"] --> targets(["targets"])
-  jobs(["scheduled jobs"]) -- heartbeats --> db
-  scheduler --> db[("SQLite")]
-  scheduler --> alerts["alert manager"]
-  scheduler --> metrics["/metrics"]
-  alerts -- "state and outbox,<br/>one transaction" --> db
-  alerts -- notifications --> ntfy(["ntfy"])
-  db --> web["status page"]
-  db --> slo["SLO evaluator"]
-  slo --> web
-  slo --> metrics
-  watchdog --> hc(["healthchecks.io"]) -. "if the pings stop" .-> ntfy
+  scheduler["scheduler"] -- "runs each check<br/>on schedule" --> probes["probes"]
+  probes -- "HTTP, TCP,<br/>DNS, TLS" --> targets(["your services"])
+  jobs(["cron jobs"]) -- "ping when<br/>they finish" --> db
+  scheduler -- "saves every<br/>result" --> db[("SQLite")]
+  scheduler -- "passes every<br/>result" --> alerts["alert manager"]
+  scheduler -- "counts and<br/>latencies" --> metrics["/metrics"]
+  alerts -- "alert state and<br/>unsent alerts" --> db
+  alerts -- "down and<br/>recovered" --> ntfy(["ntfy"])
+  db -- "recent<br/>results" --> web["status page"]
+  db -- "results in<br/>the SLO window" --> slo["SLO calculator"]
+  slo -- "availability,<br/>error budget" --> web
+  slo -- "SLO numbers" --> metrics
+  watchdog -- "pings every<br/>minute" --> hc(["healthchecks.io"])
+  hc -. "alerts if the<br/>pings stop" .-> ntfy
 ```
 
 One process does everything:
