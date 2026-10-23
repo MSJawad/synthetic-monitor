@@ -12,6 +12,7 @@ import (
 
 	"github.com/MSJawad/synthetic-monitor/internal/probe"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
+	"github.com/MSJawad/synthetic-monitor/internal/slo"
 )
 
 func TestMain(m *testing.M) {
@@ -48,11 +49,11 @@ func result(check string, start time.Time, reason probe.Reason) scheduler.Result
 
 func counts(t *testing.T, s *Store, check string, since time.Time) (int, int) {
 	t.Helper()
-	total, failed, _, err := s.Counts(t.Context(), check, since)
+	c, err := s.Counts(t.Context(), check, since)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return total, failed
+	return c.Total, c.Failed
 }
 
 func TestHistorySurvivesRestart(t *testing.T) {
@@ -93,24 +94,26 @@ func TestCountsOnlyIncludesWindow(t *testing.T) {
 	}
 }
 
-func TestCountsReportsTheFirstProbe(t *testing.T) {
+func TestCountsReportsTheFirstProbeAndFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.db")
 	now := time.Now().Truncate(time.Millisecond)
 	s := open(t, path, Options{})
-	for _, age := range []time.Duration{10 * time.Minute, 5 * time.Minute, time.Minute} {
-		s.Record(result("web", now.Add(-age), ""))
-	}
+	s.Record(result("web", now.Add(-10*time.Minute), probe.ReasonTimeout))
+	s.Record(result("web", now.Add(-5*time.Minute), ""))
+	s.Record(result("web", now.Add(-4*time.Minute), probe.ReasonConnect))
+	s.Record(result("web", now.Add(-time.Minute), probe.ReasonConnect))
 	closeStore(t, s)
 	s = open(t, path, Options{})
 	defer closeStore(t, s)
 
-	// The first probe of all, not the first in the window counted.
-	_, _, first, err := s.Counts(t.Context(), "web", now.Add(-6*time.Minute))
-	if err != nil || !first.Equal(now.Add(-10*time.Minute)) {
-		t.Errorf("first = %v, %v; want the probe 10 minutes ago, %v", first, err, now.Add(-10*time.Minute))
+	// The first probe of all, but the first failure in the window counted.
+	c, err := s.Counts(t.Context(), "web", now.Add(-6*time.Minute))
+	if err != nil || c.Total != 3 || c.Failed != 2 || !c.First.Equal(now.Add(-10*time.Minute)) ||
+		!c.FirstFailure.Equal(now.Add(-4*time.Minute)) {
+		t.Errorf("counts = %+v, %v; want 3 probes, 2 failed, the first failure 4 minutes ago and the first probe 10", c, err)
 	}
-	if _, _, first, err := s.Counts(t.Context(), "missing", now.Add(-time.Hour)); err != nil || !first.IsZero() {
-		t.Errorf("unknown check: first = %v, %v; want zero", first, err)
+	if c, err := s.Counts(t.Context(), "missing", now.Add(-time.Hour)); err != nil || c != (slo.Counts{}) {
+		t.Errorf("unknown check: %+v, %v; want nothing", c, err)
 	}
 }
 

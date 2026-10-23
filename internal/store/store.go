@@ -19,6 +19,7 @@ import (
 
 	"github.com/MSJawad/synthetic-monitor/internal/probe"
 	"github.com/MSJawad/synthetic-monitor/internal/scheduler"
+	"github.com/MSJawad/synthetic-monitor/internal/slo"
 )
 
 const (
@@ -311,17 +312,25 @@ func (s *Store) prune(ctx context.Context) error {
 }
 
 // Counts returns how many probes of check started at or after since, how
-// many of them failed, and when the check's oldest kept probe started (zero
-// if it has none).
-func (s *Store) Counts(ctx context.Context, check string, since time.Time) (total, failed int, first time.Time, err error) {
-	var firstMilli sql.NullInt64
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(1 - success), 0),
+// many of them failed, when the first of those failed, and when the check's
+// oldest kept probe started.
+func (s *Store) Counts(ctx context.Context, check string, since time.Time) (slo.Counts, error) {
+	var (
+		c                      slo.Counts
+		firstFailure, firstAny sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(1 - success), 0),
+		MIN(CASE WHEN success = 0 THEN started_at END),
 		(SELECT MIN(started_at) FROM results WHERE check_name = ?1)
-		FROM results WHERE check_name = ?1 AND started_at >= ?2`, check, since.UnixMilli()).Scan(&total, &failed, &firstMilli)
-	if firstMilli.Valid {
-		first = time.UnixMilli(firstMilli.Int64)
+		FROM results WHERE check_name = ?1 AND started_at >= ?2`, check, since.UnixMilli()).
+		Scan(&c.Total, &c.Failed, &firstFailure, &firstAny)
+	if firstFailure.Valid {
+		c.FirstFailure = time.UnixMilli(firstFailure.Int64)
 	}
-	return total, failed, first, err
+	if firstAny.Valid {
+		c.First = time.UnixMilli(firstAny.Int64)
+	}
+	return c, err
 }
 
 // truncate shortens s to at most n bytes without splitting a UTF-8

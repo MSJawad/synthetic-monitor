@@ -3,6 +3,7 @@
 package metrics
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
@@ -48,6 +49,7 @@ type Metrics struct {
 	sloTarget       *prometheus.GaugeVec
 	sloAvailability *prometheus.GaugeVec
 	sloBudget       *prometheus.GaugeVec
+	sloBurnRate     *prometheus.GaugeVec
 
 	alertFiring          *prometheus.GaugeVec
 	notificationsSent    *prometheus.CounterVec
@@ -128,6 +130,10 @@ func New() *Metrics {
 			Namespace: namespace, Name: "slo_error_budget_remaining_ratio",
 			Help: "Fraction of the check's error budget left over its SLO window; negative once overspent.",
 		}, []string{"check"}),
+		sloBurnRate: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "slo_burn_rate",
+			Help: "How fast the check's error budget was spent over the window: 1 would spend exactly all of it over the SLO window.",
+		}, []string{"check", "window"}),
 		alertFiring: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "alert_firing",
 			Help: "1 while the check's alert is firing: from the alert until the recovery notice.",
@@ -158,7 +164,7 @@ func New() *Metrics {
 	m.registry.MustRegister(
 		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.lastPing, m.checkInfo,
 		m.lag, m.skipped, m.reloads, m.lastReloadOK, m.lastReloadTimeOK,
-		m.sloTarget, m.sloAvailability, m.sloBudget,
+		m.sloTarget, m.sloAvailability, m.sloBudget, m.sloBurnRate,
 		m.alertFiring, m.notificationsSent, m.notificationFailures, m.notificationsPending, m.alertDropped,
 		m.watchdogPings,
 		collectors.NewGoCollector(),
@@ -233,7 +239,7 @@ func (m *Metrics) Forget(check string) {
 	labels := prometheus.Labels{"check": check}
 	for _, vec := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
 		m.probeDuration, m.probes, m.success, m.httpPhase, m.certExpiry, m.lastPing, m.checkInfo,
-		m.skipped, m.sloTarget, m.sloAvailability, m.sloBudget, m.alertFiring,
+		m.skipped, m.sloTarget, m.sloAvailability, m.sloBudget, m.sloBurnRate, m.alertFiring,
 	} {
 		vec.DeletePartialMatch(labels)
 	}
@@ -279,17 +285,29 @@ func (m *Metrics) SetSLOStatus(statuses map[string]slo.Status) {
 	for name, s := range statuses {
 		m.sloAvailability.WithLabelValues(name).Set(s.Availability)
 		m.sloBudget.WithLabelValues(name).Set(s.BudgetRemaining)
+		for w, rate := range s.Rates {
+			m.sloBurnRate.WithLabelValues(name, windowLabel(w)).Set(rate)
+		}
 	}
 	for name := range m.slos {
 		if _, ok := statuses[name]; !ok {
 			m.sloAvailability.DeleteLabelValues(name)
 			m.sloBudget.DeleteLabelValues(name)
+			m.sloBurnRate.DeletePartialMatch(prometheus.Labels{"check": name})
 		}
 	}
 	m.slos = make(map[string]bool, len(statuses))
 	for name := range statuses {
 		m.slos[name] = true
 	}
+}
+
+// windowLabel names a burn window as PromQL would: 5m, 1h.
+func windowLabel(w time.Duration) string {
+	if w%time.Hour == 0 {
+		return fmt.Sprintf("%dh", w/time.Hour)
+	}
+	return fmt.Sprintf("%dm", w/time.Minute)
 }
 
 // AlertObserver returns an alert.Observer that records alerting activity.

@@ -70,19 +70,130 @@ type fakeCounter struct {
 	calls  int
 }
 
-func (f *fakeCounter) Counts(_ context.Context, check string, since time.Time) (int, int, time.Time, error) {
+func (f *fakeCounter) Counts(_ context.Context, check string, since time.Time) (Counts, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	if f.since == nil {
 		f.since = make(map[string]time.Time)
 	}
-	f.since[check] = since
+	// The SLO window is the earliest asked for; the burn windows come after.
+	if prev, ok := f.since[check]; !ok || since.Before(prev) {
+		f.since[check] = since
+	}
 	if check == f.failOn {
-		return 0, 0, time.Time{}, errors.New("database is locked")
+		return Counts{}, errors.New("database is locked")
 	}
 	c := f.counts[check]
-	return c[0], c[1], f.first[check], nil
+	return Counts{Total: c[0], Failed: c[1], First: f.first[check]}, nil
+}
+
+// history answers Counts from individual probes, so every window counts
+// what it would in the store.
+type history map[string][]sample
+
+type sample struct {
+	at time.Time
+	ok bool
+}
+
+func (h history) Counts(_ context.Context, check string, since time.Time) (Counts, error) {
+	var c Counts
+	for _, p := range h[check] {
+		if c.First.IsZero() || p.at.Before(c.First) {
+			c.First = p.at
+		}
+		if p.at.Before(since) {
+			continue
+		}
+		c.Total++
+		if !p.ok {
+			c.Failed++
+			if c.FirstFailure.IsZero() || p.at.Before(c.FirstFailure) {
+				c.FirstFailure = p.at
+			}
+		}
+	}
+	return c, nil
+}
+
+// probes returns a probe every interval for the span before now, oldest
+// first; failed decides, by age, which ones fail.
+func probes(now time.Time, span, interval time.Duration, failed func(age time.Duration, i int) bool) []sample {
+	var out []sample
+	for i, age := 0, span; age > 0; i, age = i+1, age-interval {
+		out = append(out, sample{at: now.Add(-age), ok: !failed(age, i)})
+	}
+	return out
+}
+
+func TestBurnThresholds(t *testing.T) {
+	month, week := 30*24*time.Hour, 7*24*time.Hour
+	for _, tt := range []struct {
+		rule   BurnRule
+		window time.Duration
+		want   float64
+	}{
+		{BurnRules[0], month, 14.4}, {BurnRules[1], month, 6},
+		{BurnRules[0], week, 3.36}, {BurnRules[1], week, 1.4},
+	} {
+		if got := tt.rule.Threshold(tt.window); !near(got, tt.want) {
+			t.Errorf("%v rule over %v: threshold %v, want %v", tt.rule.Long, tt.window, got, tt.want)
+		}
+	}
+}
+
+func TestEvaluateBurning(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	never := func(time.Duration, int) bool { return false }
+	check := func(name string) config.Check {
+		c := withSLO(name, 99.5, 30)
+		c.FailureThreshold = 3
+		return c
+	}
+	h := history{
+		// Every other probe failing for the last 20 minutes, as when one of
+		// two replicas is broken: never 3 in a row.
+		"flaky": probes(now, 8*time.Hour, 30*time.Second, func(age time.Duration, i int) bool {
+			return age <= 20*time.Minute && i%2 == 0
+		}),
+		// The same for 50 minutes, stopping 10 minutes ago: the last 5
+		// minutes are clean, so the fast rule no longer fires, but the slow
+		// one, which looks at the last 30, still does.
+		"settling": probes(now, 8*time.Hour, 30*time.Second, func(age time.Duration, i int) bool {
+			return age > 10*time.Minute && age <= time.Hour && i%2 == 0
+		}),
+		// The same pattern, long enough ago that both rules have cleared.
+		"recovered": probes(now, 8*time.Hour, 30*time.Second, func(age time.Duration, i int) bool {
+			return age > 2*time.Hour && age <= 150*time.Minute && i%2 == 0
+		}),
+		"healthy": probes(now, 8*time.Hour, 30*time.Second, never),
+		// Probed hourly: one failure is a 100% failure rate, but not 3 failures.
+		"hourly": probes(now, 8*time.Hour, time.Hour, func(age time.Duration, _ int) bool { return age <= time.Hour }),
+	}
+	statuses, err := Evaluate(t.Context(), h,
+		[]config.Check{check("flaky"), check("settling"), check("recovered"), check("healthy"), check("hourly")}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	flaky := statuses["flaky"]
+	if b := flaky.Burning; b == nil || b.Rule != BurnRules[0] || b.Failed != 20 || b.Total != 120 ||
+		!b.Since.Equal(now.Add(-20*time.Minute)) {
+		t.Errorf("flaky: burning %+v; want the fast rule, 20 of 120 probes failed since 20 minutes ago", b)
+	}
+	// 20 of 120 failed against an allowance of 0.6: a rate of 33.3.
+	if !near(flaky.Rates[time.Hour], 20/0.6) || !near(flaky.Rates[5*time.Minute], 5/0.05) {
+		t.Errorf("flaky: rates %v; want 33.3 over an hour and 100 over 5 minutes", flaky.Rates)
+	}
+	if b := statuses["settling"].Burning; b == nil || b.Rule != BurnRules[1] {
+		t.Errorf("settling: burning %+v; want the slow rule only", b)
+	}
+	for _, name := range []string{"recovered", "healthy", "hourly"} {
+		if b := statuses[name].Burning; b != nil {
+			t.Errorf("%s: burning %+v; want nil", name, b)
+		}
+	}
 }
 
 func withSLO(name string, target float64, days int) config.Check {

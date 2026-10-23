@@ -186,8 +186,9 @@ synthetic_alert_firing{check="up"} 0
 
 func TestSetSLOStatusReplacesSeries(t *testing.T) {
 	m := New()
-	m.SetSLOStatus(map[string]slo.Status{"a": {Availability: 0.99, BudgetRemaining: 0.5}, "b": {Availability: 1, BudgetRemaining: 1}})
-	m.SetSLOStatus(map[string]slo.Status{"a": {Availability: 0.98, BudgetRemaining: -0.2}})
+	rates := map[time.Duration]float64{5 * time.Minute: 100, time.Hour: 33.5}
+	m.SetSLOStatus(map[string]slo.Status{"a": {Availability: 0.99, BudgetRemaining: 0.5}, "b": {Availability: 1, BudgetRemaining: 1, Rates: rates}})
+	m.SetSLOStatus(map[string]slo.Status{"a": {Availability: 0.98, BudgetRemaining: -0.2, Rates: rates}})
 
 	want := `
 # HELP synthetic_slo_availability_ratio Fraction of the check's probes that succeeded over its SLO window.
@@ -196,9 +197,13 @@ synthetic_slo_availability_ratio{check="a"} 0.98
 # HELP synthetic_slo_error_budget_remaining_ratio Fraction of the check's error budget left over its SLO window; negative once overspent.
 # TYPE synthetic_slo_error_budget_remaining_ratio gauge
 synthetic_slo_error_budget_remaining_ratio{check="a"} -0.2
+# HELP synthetic_slo_burn_rate How fast the check's error budget was spent over the window: 1 would spend exactly all of it over the SLO window.
+# TYPE synthetic_slo_burn_rate gauge
+synthetic_slo_burn_rate{check="a",window="1h"} 33.5
+synthetic_slo_burn_rate{check="a",window="5m"} 100
 `
 	if err := testutil.CollectAndCompare(m.registry, strings.NewReader(want),
-		"synthetic_slo_availability_ratio", "synthetic_slo_error_budget_remaining_ratio"); err != nil {
+		"synthetic_slo_availability_ratio", "synthetic_slo_error_budget_remaining_ratio", "synthetic_slo_burn_rate"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -218,7 +223,7 @@ func TestForgetDeletesEveryCheckSeries(t *testing.T) {
 		{Name: "gone", TCP: &config.TCP{}, SLO: &config.SLO{Target: 99, WindowDays: 1}},
 		{Name: "kept", TCP: &config.TCP{}},
 	})
-	m.SetSLOStatus(map[string]slo.Status{"gone": {Availability: 1, BudgetRemaining: 1}})
+	m.SetSLOStatus(map[string]slo.Status{"gone": {Availability: 1, BudgetRemaining: 1, Rates: map[time.Duration]float64{time.Hour: 1}}})
 
 	m.Forget("gone")
 	got, err := testutil.GatherAndCount(m.registry)

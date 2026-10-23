@@ -242,11 +242,11 @@ func TestMonitor(t *testing.T) {
 	}
 	defer history.Close(context.Background())
 	for _, check := range []string{"web", "port"} {
-		total, _, _, err := history.Counts(t.Context(), check, time.Now().Add(-time.Hour))
+		c, err := history.Counts(t.Context(), check, time.Now().Add(-time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if logged := count(entries, "probe succeeded", check); total != logged {
+		if logged, total := count(entries, "probe succeeded", check), c.Total; total != logged {
 			t.Errorf("history holds %d results for %s, want the %d logged", total, check, logged)
 		}
 	}
@@ -324,12 +324,12 @@ func TestShutdownDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer history.Close(context.Background())
-	total, _, _, err := history.Counts(t.Context(), "web", time.Now().Add(-time.Hour))
+	c, err := history.Counts(t.Context(), "web", time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if logged := count(entries, "probe succeeded", "web"); total != logged {
-		t.Errorf("history holds %d results for web, want the %d logged", total, logged)
+	if logged := count(entries, "probe succeeded", "web"); c.Total != logged {
+		t.Errorf("history holds %d results for web, want the %d logged", c.Total, logged)
 	}
 }
 

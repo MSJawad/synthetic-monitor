@@ -10,6 +10,10 @@
 // only the time since its first probe, and its Status says so. An incident
 // in a check's first hours therefore weighs as much as it did in the time
 // measured, and can overspend the budget until more history dilutes it.
+//
+// The package also measures how fast each check is spending its budget, for
+// alerting: a check failing on and off never fails enough probes in a row
+// to alert, but it can burn through its budget all the same.
 package slo
 
 import (
@@ -39,6 +43,49 @@ type Status struct {
 	// probe, in which case Partial is set.
 	Since   time.Time
 	Partial bool
+	// Rates holds the burn rate over each of BurnWindows: how fast the
+	// budget is being spent, as a multiple of the rate that would spend
+	// exactly all of it over the SLO window.
+	Rates map[time.Duration]float64
+	// Burning is the first of BurnRules that fires, or nil.
+	Burning *Burn
+}
+
+// A BurnRule fires when a check's failures, if they kept up, would spend
+// Share of its whole error budget within Long, and are still that frequent
+// over Short. The long window keeps one bad minute from paging anyone; the
+// short one lets the alert clear soon after the failures stop. These are
+// the two paging rules from Google's SRE workbook.
+type BurnRule struct {
+	Long, Short time.Duration
+	Share       float64
+}
+
+// BurnRules are tried in order: the fast rule catches heavy failures within
+// minutes, the slow one a steadier trickle within hours.
+var BurnRules = []BurnRule{
+	{Long: time.Hour, Short: 5 * time.Minute, Share: 0.02},
+	{Long: 6 * time.Hour, Short: 30 * time.Minute, Share: 0.05},
+}
+
+// BurnWindows are the windows BurnRules measure, shortest first.
+var BurnWindows = []time.Duration{5 * time.Minute, 30 * time.Minute, time.Hour, 6 * time.Hour}
+
+// Threshold is the burn rate at which r fires for an SLO over window: the
+// rate that would spend r.Share of the budget in r.Long. Over 30 days it is
+// 14.4 for the fast rule and 6 for the slow one.
+func (r BurnRule) Threshold(window time.Duration) float64 {
+	return r.Share * float64(window) / float64(r.Long)
+}
+
+// Burn describes a burn rule that fired.
+type Burn struct {
+	Rule BurnRule
+	// Rate, Failed and Total are over the rule's long window.
+	Rate          float64
+	Failed, Total int
+	// Since is when the first failure in the long window started.
+	Since time.Time
 }
 
 // Compute measures failed failures out of total probes against target, a
@@ -61,10 +108,45 @@ func Compute(target float64, window time.Duration, total, failed int) (Status, b
 	}, true
 }
 
-// Counter counts a check's probes, and failed probes, since a time, and
-// reports when the check's oldest kept probe started (zero if none).
+// Counts describes a check's probes from some time on.
+type Counts struct {
+	Total, Failed int
+	// FirstFailure is when the earliest failed probe in the period started,
+	// zero if none failed.
+	FirstFailure time.Time
+	// First is when the check's oldest kept probe started, whether in the
+	// period or before it; zero if it has none.
+	First time.Time
+}
+
+// Counter counts a check's probes since a time.
 type Counter interface {
-	Counts(ctx context.Context, check string, since time.Time) (total, failed int, first time.Time, err error)
+	Counts(ctx context.Context, check string, since time.Time) (Counts, error)
+}
+
+// burnRate is how fast failed failures out of total probes spend an error
+// budget for target: 1 spends exactly the budget, 2 twice as fast.
+func burnRate(target float64, c Counts) float64 {
+	if c.Total == 0 {
+		return 0
+	}
+	// As in Compute, total - target*total avoids 1-target's rounding.
+	return float64(c.Failed) / (float64(c.Total) - target*float64(c.Total))
+}
+
+// burning returns the first burn rule that fires for s, or nil. A rule
+// also needs minFailures failures in its long window, so that one failed
+// probe of a check probed a few times an hour can't page anyone.
+func burning(s Status, windows map[time.Duration]Counts, minFailures int) *Burn {
+	for _, r := range BurnRules {
+		threshold := r.Threshold(s.Window)
+		long := windows[r.Long]
+		if long.Failed < minFailures || s.Rates[r.Long] < threshold || s.Rates[r.Short] < threshold {
+			continue
+		}
+		return &Burn{Rule: r, Rate: s.Rates[r.Long], Failed: long.Failed, Total: long.Total, Since: long.FirstFailure}
+	}
+	return nil
 }
 
 // Evaluate returns the status of every check that has an SLO and probes in
@@ -73,26 +155,42 @@ type Counter interface {
 func Evaluate(ctx context.Context, counter Counter, checks []config.Check, now time.Time) (map[string]Status, error) {
 	statuses := make(map[string]Status)
 	var errs []error
+checks:
 	for _, c := range checks {
 		if c.SLO == nil {
 			continue
 		}
 		start := now.Add(-c.SLO.Window())
-		total, failed, first, err := counter.Counts(ctx, c.Name, start)
+		all, err := counter.Counts(ctx, c.Name, start)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("counting probes of %s: %w", c.Name, err))
 			continue
 		}
-		if s, ok := Compute(c.SLO.Ratio(), c.SLO.Window(), total, failed); ok {
-			// The check's first probe ever decides, not its first in the
-			// window: if the monitor was down when the window began, the
-			// window is still covered, and that time counts for neither side.
-			s.Since, s.Partial = start, first.After(start)
-			if s.Partial {
-				s.Since = first
-			}
-			statuses[c.Name] = s
+		s, ok := Compute(c.SLO.Ratio(), c.SLO.Window(), all.Total, all.Failed)
+		if !ok {
+			continue
 		}
+		// The check's first probe ever decides, not its first in the window:
+		// if the monitor was down when the window began, the window is still
+		// covered, and that time counts for neither side.
+		s.Since, s.Partial = start, all.First.After(start)
+		if s.Partial {
+			s.Since = all.First
+		}
+		windows := make(map[time.Duration]Counts, len(BurnWindows))
+		s.Rates = make(map[time.Duration]float64, len(BurnWindows))
+		for _, w := range BurnWindows {
+			counts, err := counter.Counts(ctx, c.Name, now.Add(-w))
+			if err != nil {
+				// Left out entirely rather than reported as not burning,
+				// which could end an incident the check is still in.
+				errs = append(errs, fmt.Errorf("counting probes of %s: %w", c.Name, err))
+				continue checks
+			}
+			windows[w], s.Rates[w] = counts, burnRate(s.Target, counts)
+		}
+		s.Burning = burning(s, windows, max(c.FailureThreshold, 1))
+		statuses[c.Name] = s
 	}
 	return statuses, errors.Join(errs...)
 }
