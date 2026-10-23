@@ -351,6 +351,8 @@ func TestPage(t *testing.T) {
 		`<span class="wide">Last 90 days</span><span class="narrow">Last 30 days</span>`,
 		`<span class="wide">97.9%</span><span class="narrow">97.9%</span> uptime`,
 		`<li class="day" data-state="down" title="Today: 99.8% up, down for 2s"></li>`,
+		"<summary>Daily uptime</summary>",
+		`<tr class="failed"><td>Today</td><td>Down for 2s</td><td class="num">99.8%</td></tr>`,
 		`<span class="incident-check">apartment-api</span> Down</span>`,
 		`<p class="incident-meta">Since Oct 21, 14:59 UTC · Timed out</p>`,
 		`<p class="incident-meta">Oct 20, 14:00 to 14:34 UTC · Connection failed</p>`,

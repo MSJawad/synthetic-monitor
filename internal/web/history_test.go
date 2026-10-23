@@ -1,6 +1,7 @@
 package web
 
 import (
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -31,6 +32,8 @@ func TestHistoryBars(t *testing.T) {
 		{Check: "web", Start: day(4).Add(5 * time.Hour), End: day(4).Add(5*time.Hour + 10*time.Minute)},
 		// Failing on and off three days ago.
 		{Check: "web", Start: day(3).Add(time.Hour), End: day(3).Add(3*time.Hour + 5*time.Minute), Burn: true},
+		// Down ten days ago, while nothing was recorded.
+		{Check: "web", Start: day(10).Add(time.Hour), End: day(10).Add(2 * time.Hour)},
 	}
 	h := buildHistory(days, incidents, now)
 	if len(h.Days) != historyDays {
@@ -41,6 +44,7 @@ func TestHistoryBars(t *testing.T) {
 		70: {State: stateUp, Title: "Aug 12: 100% up, no incidents", Older: true},
 		30: {State: statePending, Title: "Sep 21: no data", Older: true},
 		29: {State: statePending, Title: "Sep 22: no data"},
+		10: {State: stateDown, Title: "Oct 11: down for 1h"},
 		5:  {State: stateUp, Title: "Oct 16: 99.93% up, no incidents"},
 		4:  {State: stateDown, Title: "Oct 17: 89.58% up, 2 incidents, 1h 10m in all"},
 		3:  {State: stateFailing, Title: "Oct 18: 96.52% up, failing on and off for 2h 5m"},
@@ -57,8 +61,21 @@ func TestHistoryBars(t *testing.T) {
 	if h.Uptime != "97.53%" || h.NarrowUptime != "97.51%" {
 		t.Errorf("uptime %s, last 30 days %s; want 97.53%% and 97.51%%", h.Uptime, h.NarrowUptime)
 	}
-	if want := "Last 90 days: 97.53% uptime, 5 days with incidents"; h.Summary != want {
+	if want := "Last 90 days: 97.53% uptime, 6 days with incidents"; h.Summary != want {
 		t.Errorf("summary %q, want %q", h.Summary, want)
+	}
+	wantRows := []dayRow{
+		{Day: "Today", Incidents: "Down for 30m", Uptime: "100%", Incident: true},
+		{Day: "Oct 20", Incidents: "Down for 1h 30m", Uptime: "100%", Incident: true},
+		{Day: "Oct 19", Incidents: "Down for 1h", Uptime: "100%", Incident: true},
+		{Day: "Oct 18", Incidents: "Failing on and off for 2h 5m", Uptime: "96.52%", Incident: true},
+		{Day: "Oct 17", Incidents: "2 incidents, 1h 10m in all", Uptime: "89.58%", Incident: true},
+		{Day: "Oct 16", Incidents: "None", Uptime: "99.93%"},
+		{Day: "Oct 11", Incidents: "Down for 1h", Uptime: "No data", Incident: true},
+		{Day: "Aug 12", Incidents: "None", Uptime: "100%"},
+	}
+	if !slices.Equal(h.Rows, wantRows) {
+		t.Errorf("rows = %+v,\nwant %+v: the days with probes or incidents, newest first", h.Rows, wantRows)
 	}
 }
 

@@ -1,7 +1,9 @@
 package web
 
 import (
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/MSJawad/synthetic-monitor/internal/store"
@@ -19,6 +21,10 @@ const (
 // historyView is a check's last historyDays days, one bar each.
 type historyView struct {
 	Days []dayView // oldest first, ending today
+	// Rows are the days with probes or incidents, newest first, for the
+	// table that holds what the bars' tooltips do, for those who can't
+	// hover.
+	Rows []dayRow
 	// Uptime is the share of probes that succeeded over all the days, and
 	// NarrowUptime over the last narrowDays; empty without any probes.
 	Uptime, NarrowUptime string
@@ -33,6 +39,13 @@ type dayView struct {
 	State state
 	Title string
 	Older bool // before the last narrowDays, so hidden on a narrow screen
+}
+
+type dayRow struct {
+	Day       string // "Oct 21", or "Today"
+	Incidents string // "None", "Down for 34m", "2 incidents, 1h 10m in all"
+	Uptime    string // "99.93%", or "No data"
+	Incident  bool   // whether the check had an incident that day
 }
 
 type incidentView struct {
@@ -92,7 +105,26 @@ func buildHistory(days []store.Day, incidents []store.Incident, now time.Time) h
 		if count > 0 {
 			incidentDays++
 		}
-		v.Title = dayTitle(start, today, d, count, down, flapping, lasted)
+		row := dayRow{Day: start.Format("Jan 2"), Uptime: "No data", Incident: count > 0}
+		if start.Equal(today) {
+			row.Day = "Today"
+		}
+		v.Title = row.Day + ": no data"
+		if d.Probes > 0 || count > 0 {
+			// Like "Oct 21: 99.93% up, down for 34m".
+			v.Title = row.Day + ": "
+			if d.Probes > 0 {
+				row.Uptime = percent(float64(d.Probes-d.Failed) / float64(d.Probes))
+				v.Title += row.Uptime + " up, "
+			}
+			switch row.Incidents = incidentSummary(count, down, flapping, lasted); row.Incidents {
+			case "":
+				row.Incidents, v.Title = "None", v.Title+"no incidents"
+			default:
+				v.Title += strings.ToLower(row.Incidents[:1]) + row.Incidents[1:]
+			}
+			h.Rows = append(h.Rows, row)
+		}
 		h.Days = append(h.Days, v)
 
 		probes, failed = probes+d.Probes, failed+d.Failed
@@ -111,31 +143,23 @@ func buildHistory(days []store.Day, incidents []store.Incident, now time.Time) h
 		h.Summary += h.Uptime + " uptime, "
 	}
 	h.Summary += plural(incidentDays, "day", "days") + " with incidents"
+	slices.Reverse(h.Rows)
 	return h
 }
 
-// dayTitle reads like "Oct 21: 99.93% up, down for 34m".
-func dayTitle(start, today time.Time, d store.Day, incidents int, down, flapping, lasted time.Duration) string {
-	t := start.Format("Jan 2")
-	if start.Equal(today) {
-		t = "Today"
-	}
-	if d.Probes == 0 && incidents == 0 {
-		return t + ": no data"
-	}
-	t += ": "
-	if d.Probes > 0 {
-		t += percent(float64(d.Probes-d.Failed)/float64(d.Probes)) + " up, "
-	}
+// incidentSummary describes a day's incidents, given how many there were
+// and how long the check was down and failing on and off that day: "Down
+// for 34m", "2 incidents, 1h 10m in all", or empty if there were none.
+func incidentSummary(count int, down, flapping, lasted time.Duration) string {
 	switch {
-	case incidents == 0:
-		return t + "no incidents"
-	case incidents > 1:
-		return t + strconv.Itoa(incidents) + " incidents, " + span(lasted) + " in all"
+	case count == 0:
+		return ""
+	case count > 1:
+		return strconv.Itoa(count) + " incidents, " + span(lasted) + " in all"
 	case down > 0:
-		return t + "down for " + span(down)
+		return "Down for " + span(down)
 	}
-	return t + "failing on and off for " + span(flapping)
+	return "Failing on and off for " + span(flapping)
 }
 
 func buildIncidents(incidents []store.Incident) []incidentView {

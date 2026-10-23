@@ -93,6 +93,19 @@
         <p class="history-axis"><span class="wide">{{$.HistoryDays}} days ago</span><span class="narrow">{{$.NarrowDays}} days ago</span><span>Today</span></p>
         {{- end}}
       </section>
+      {{- if .Rows}}
+      <details class="probes">
+        <summary>Daily uptime</summary>
+        <table>
+          <thead><tr><th scope="col">Day</th><th scope="col">Incidents</th><th scope="col" class="num">Uptime</th></tr></thead>
+          <tbody>
+          {{- range .Rows}}
+            <tr{{if .Incident}} class="failed"{{end}}><td>{{.Day}}</td><td>{{.Incidents}}</td><td class="num">{{.Uptime}}</td></tr>
+          {{- end}}
+          </tbody>
+        </table>
+      </details>
+      {{- end}}
       {{- end}}
 
       {{- if .Probes}}
