@@ -136,65 +136,25 @@ checks. On an 8-core M1 running Linux it did 24,000 a second. The numbers,
 how I measured them and where the CPU goes are in
 [docs/performance.md](docs/performance.md).
 
-## Design decisions
+## How it behaves
 
-The main ones, short. The full list with all the reasoning is in
-[docs/decisions.md](docs/decisions.md).
-
-**SQLite, not Postgres or a time-series database.** Twenty checks every 30
-seconds is less than one write a second, and the writer handles about
-170,000. Postgres would be one more thing to run, secure and back up, for
-data only this process touches. A time-series database like Prometheus is
-made for numbers, not individual results with an error attached, and a
-status page shouldn't go down because another system did. If several
-monitors ever need to share one history, that's when Postgres makes sense.
-
-**One alert per incident.** A check needs 3 failures in a row to alert and
-2 passes in a row to recover. One blip doesn't wake anyone up, and something
-flapping stays one alert instead of a stream of them.
-
-**Alerts survive restarts.** When a check goes down, its new state and the
-alert are saved together in SQLite, and a separate loop keeps sending saved
-alerts to ntfy until ntfy takes them. A restart in the middle of an incident
-doesn't lose the alert or the recovery. At worst an alert gets sent twice,
-and for alerts that's the right way to fail.
-
-**Every probe is a new visitor.** Probes never reuse connections, so each
-one does DNS, connects and does a TLS handshake. With reuse, a broken DNS
-record or an expired certificate could hide behind a connection that's still
-open.
-
-**SLOs come from the monitor's own history.** Availability is the share of
-probes in the window that passed. Prometheus keeps 15 days by default, which
-can't cover a 30-day SLO, so the monitor works it out from SQLite. Until it
-has a full window of history, the status page says what period the number
-covers.
-
-**One pod.** History and alert state live in one SQLite file with one
-writer, so it runs as a single pod that gets replaced, not rolled. Two
-copies would both probe and both alert. The cost is a few seconds without
-probes during a deploy.
-
-**No JavaScript on the status page.** It's rendered on the server, charts
-included, so the page can block scripts completely. It only shows check
-names, never hostnames, since it's public.
-
-## Limits
-
-What v1 doesn't do, and what I'd add next:
-
-- It watches from one place. In production it's on the same VM as the site,
-  so it can't tell "down for everyone" from "down from here". A second
-  instance somewhere else, alerting only when both agree, would fix that.
-- Alerts need failures in a row. If one of two pods breaks, about half the
-  probes fail at random, and it alerts and recovers over and over. Alerting
-  on how fast the error budget is burning would handle that better.
-- Alerts only go to ntfy, and there's no way to silence them for planned
-  work.
-- History lives on one disk. Streaming it to object storage with Litestream
-  would protect it.
-- It speaks HTTP, not JavaScript, so a page that loads but fails to render
-  still passes.
+- It alerts after 3 failures in a row and sends a recovery after 2 passes in
+  a row, so one blip doesn't page anyone. Both numbers can be changed per
+  check.
+- Alerts are saved before they're sent, and it keeps retrying until ntfy
+  takes them, so a restart in the middle of an incident won't lose one.
+- Every probe opens a fresh connection, with its own DNS lookup and TLS
+  handshake, the same as a new visitor.
+- SLOs are worked out from its own history, over the last 30 days by
+  default.
+- History lives in SQLite. At this scale it's plenty, and there's no
+  database to run. Why not Postgres or a time-series database is in
+  [docs/decisions.md](docs/decisions.md#history-in-sqlite-not-postgres-or-a-time-series-database),
+  along with the reasoning behind everything else here.
+- It runs as one pod. A deploy replaces it, so there are a few seconds
+  without probes.
+- The status page has no JavaScript and only shows check names, never
+  hostnames.
 
 ## Development
 
