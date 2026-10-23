@@ -2,8 +2,8 @@
 # number>; Flux checks the registry every minute and upgrades to the highest.
 #
 # One Secret in this namespace is created by hand, never committed:
-# synthetic-monitor, holding NTFY_URL, HEARTBEAT_TOKEN and WATCHDOG_URL. The
-# README's production section has the command.
+# synthetic-monitor, holding NTFY_URL, HEARTBEAT_TOKEN and WATCHDOG_URL.
+# docs/production.md has the command.
 apiVersion: v1
 kind: Namespace
 metadata:
