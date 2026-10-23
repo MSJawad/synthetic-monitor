@@ -88,6 +88,12 @@ func TestDownSince(t *testing.T) {
 	if got := buildCheck(in, now).Since; got != "Incident began Oct 20 09:00 UTC, 30h ago" {
 		t.Errorf("Since while recovering = %q", got)
 	}
+	// Held open by a burning error budget, whatever the last probe did.
+	in.check.SLO = &config.SLO{Target: 99.5, WindowDays: 30}
+	in.slo = &slo.Status{Window: 30 * 24 * time.Hour, Burning: &slo.Burn{Rule: slo.BurnRules[0]}}
+	if got := buildCheck(in, now).Since; got != "Failing on and off since Oct 20 09:00 UTC, 30h ago" {
+		t.Errorf("Since while burning = %q", got)
+	}
 }
 
 func TestHeadline(t *testing.T) {

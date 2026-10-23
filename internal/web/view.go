@@ -157,12 +157,15 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 		v.State = stateFailing
 	}
 	since := clock(in.firingSince, now) + ", " + ago(now.Sub(in.firingSince))
-	switch v.State {
-	case stateDown:
+	switch {
+	case firing && in.slo != nil && in.slo.Burning != nil:
+		// The incident lasts while the budget burns, so each probe's pass or
+		// fail says less than the pattern does.
+		v.Since = "Failing on and off since " + since
+	case v.State == stateDown:
 		v.Since = "Down since " + since
-	case stateRecovering:
+	case v.State == stateRecovering:
 		v.Since = "Incident began " + since
-	case statePending, stateUp, stateFailing:
 	}
 	v.Checked = "Checked " + ago(now.Sub(last.Start))
 	switch {

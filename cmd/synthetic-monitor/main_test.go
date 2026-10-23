@@ -22,6 +22,7 @@ import (
 
 	"github.com/MSJawad/synthetic-monitor/internal/alert"
 	"github.com/MSJawad/synthetic-monitor/internal/config"
+	"github.com/MSJawad/synthetic-monitor/internal/slo"
 	"github.com/MSJawad/synthetic-monitor/internal/store"
 )
 
@@ -608,4 +609,22 @@ func index(entries []logEntry, msg string) int {
 		}
 	}
 	return -1
+}
+
+func TestBurnsTellAlertsWhatWasEvaluated(t *testing.T) {
+	since := time.Now().Add(-20 * time.Minute)
+	got := burns(map[string]slo.Status{
+		"flaky":   {Burning: &slo.Burn{Rule: slo.BurnRules[0], Rate: 33, Failed: 20, Total: 120, Since: since}},
+		"healthy": {},
+	})
+	want := &alert.Burn{Failed: 20, Total: 120, Window: time.Hour, Rate: 33, Since: since}
+	if b, ok := got["healthy"]; !ok || b != nil {
+		t.Errorf("healthy = %v, %v; want evaluated and not burning", b, ok)
+	}
+	if b := got["flaky"]; b == nil || *b != *want {
+		t.Errorf("flaky = %+v, want %+v", b, want)
+	}
+	if len(got) != 2 {
+		t.Errorf("burns = %v, want just the two evaluated checks", got)
+	}
 }

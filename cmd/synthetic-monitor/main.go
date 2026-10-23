@@ -316,6 +316,7 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 			func(statuses map[string]slo.Status) {
 				m.SetSLOStatus(statuses)
 				slos.Store(&statuses)
+				alerts.SetBurns(burns(statuses))
 			}, logger)
 	})
 
@@ -358,6 +359,19 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 
 // newMux routes the server's endpoints. heartbeats is nil when pings are
 // disabled.
+// burns turns SLO statuses into the burn evaluations the alert manager
+// takes: for each check evaluated, the rule that fires, or nil.
+func burns(statuses map[string]slo.Status) map[string]*alert.Burn {
+	out := make(map[string]*alert.Burn, len(statuses))
+	for name, s := range statuses {
+		out[name] = nil
+		if b := s.Burning; b != nil {
+			out[name] = &alert.Burn{Failed: b.Failed, Total: b.Total, Window: b.Rule.Long, Rate: b.Rate, Since: b.Since}
+		}
+	}
+	return out
+}
+
 func newMux(ready *atomic.Bool, metrics, status, heartbeats http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", status)
