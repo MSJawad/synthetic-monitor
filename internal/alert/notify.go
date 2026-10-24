@@ -117,9 +117,12 @@ func render(n Notification) (title, body, priority, tags string) {
 			}
 			return n.Check + " is failing on and off", body, "high", "rotating_light"
 		}
+		failed := fmt.Sprintf("%d probes in a row have failed", n.Probes)
+		if n.Probes == 1 {
+			failed = "1 probe in a row has failed"
+		}
 		return n.Check + " is failing",
-			fmt.Sprintf("%d probes in a row have failed, the first at %s.\nLatest failure (%s): %s",
-				n.Probes, stamp(n.Since), n.Reason, n.Error),
+			fmt.Sprintf("%s, the first at %s.\nLatest failure (%s): %s", failed, stamp(n.Since), n.Reason, n.Error),
 			"high", "rotating_light"
 	case KindRecovery:
 		return n.Check + " recovered",

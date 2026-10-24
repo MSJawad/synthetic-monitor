@@ -300,6 +300,15 @@ func TestFlappingIsOneIncident(t *testing.T) {
 	}
 }
 
+func TestRenderAlertAfterOneFailure(t *testing.T) {
+	n := sampleAlert
+	n.Probes = 1
+	_, body, _, _ := render(n)
+	if want := "1 probe in a row has failed, the first at 2026-10-21 14:00:00 UTC."; !strings.HasPrefix(body, want) {
+		t.Errorf("body = %q, want it to begin %q", body, want)
+	}
+}
+
 func TestRenderBurnAlert(t *testing.T) {
 	n := Notification{Kind: KindAlert, Check: "web", Burn: burn, Reason: probe.ReasonHTTPStatus, Error: "status 500, want 2xx"}
 	title, body, priority, _ := render(n)
