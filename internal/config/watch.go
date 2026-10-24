@@ -19,7 +19,7 @@ type Watcher struct {
 	path    string
 	env     Env
 	last    []byte // the contents last read, valid or not
-	lastErr string // the last read error, so a missing file is reported once
+	lastErr string // the last read error, so a missing file is reported once; empty if the last read worked
 }
 
 // NewWatcher loads the config at path, looking up the variables it refers
@@ -40,7 +40,9 @@ func NewWatcher(path string, env Env) (*Watcher, *Config, error) {
 // receives, until ctx is done. When the contents have changed, it calls
 // apply with the new config, or reject with the reason they are invalid, in
 // which case the previous config stays in effect. Each distinct problem is
-// reported once, not on every check.
+// reported once, not on every check. A file that could not be read counts
+// as changed once it can be again, even with the same contents, so that
+// its config is applied, or rejected, anew.
 func (w *Watcher) Run(ctx context.Context, interval time.Duration, trigger <-chan os.Signal, apply func(*Config), reject func(error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -64,8 +66,9 @@ func (w *Watcher) check(apply func(*Config), reject func(error)) {
 		}
 		return
 	}
+	unreadable := w.lastErr != ""
 	w.lastErr = ""
-	if bytes.Equal(data, w.last) {
+	if bytes.Equal(data, w.last) && !unreadable {
 		return
 	}
 	w.last = data
