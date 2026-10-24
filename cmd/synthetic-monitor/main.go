@@ -62,11 +62,14 @@ func (o options) retention() time.Duration {
 	return time.Duration(o.retentionDays) * 24 * time.Hour
 }
 
-func parseFlags(args []string) (options, error) {
+// parseFlags parses the command line, writing usage and flag errors to
+// output.
+func parseFlags(args []string, output io.Writer) (options, error) {
 	o := options{sloInterval: 30 * time.Second, flushTimeout: 5 * time.Second}
 	flags := flag.NewFlagSet("synthetic-monitor", flag.ContinueOnError)
+	flags.SetOutput(output)
 	flags.StringVar(&o.configPath, "config", "", "path to the checks file (required)")
-	flags.StringVar(&o.listen, "listen", ":8080", "address of the HTTP server for metrics and health checks")
+	flags.StringVar(&o.listen, "listen", ":8080", "address of the HTTP server for the status page, heartbeats, metrics and health checks")
 	flags.StringVar(&o.debugListen, "debug-listen", "",
 		"address for pprof profiling endpoints, such as 127.0.0.1:6060; off if empty, never expose publicly")
 	flags.StringVar(&o.historyPath, "history", "history.db", "path to the SQLite database of probe results")
@@ -94,7 +97,7 @@ func parseFlags(args []string) (options, error) {
 }
 
 func run(ctx context.Context, args []string, stdout io.Writer) error {
-	o, err := parseFlags(args)
+	o, err := parseFlags(args, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -367,8 +370,6 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 	return err
 }
 
-// newMux routes the server's endpoints. heartbeats is nil when pings are
-// disabled.
 // burns turns SLO statuses into the burn evaluations the alert manager
 // takes: for each check evaluated, the rule that fires, or nil.
 func burns(statuses map[string]slo.Status) map[string]*alert.Burn {
@@ -382,6 +383,8 @@ func burns(statuses map[string]slo.Status) map[string]*alert.Burn {
 	return out
 }
 
+// newMux routes the server's endpoints. heartbeats is nil when pings are
+// disabled.
 func newMux(ready *atomic.Bool, metrics, status, heartbeats http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", status)

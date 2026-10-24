@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestParseFlags(t *testing.T) {
-	o, err := parseFlags([]string{"-config", "checks.yaml", "-log-level", "debug"})
+	o, err := parseFlags([]string{"-config", "checks.yaml", "-log-level", "debug"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestParseFlags(t *testing.T) {
 		{"-config", "c.yaml", "-watchdog-interval", "0s"},
 		{"-config", "c.yaml", "-log-level", "loud"},
 	} {
-		if _, err := parseFlags(args); err == nil {
+		if _, err := parseFlags(args, io.Discard); err == nil {
 			t.Errorf("parseFlags(%q) succeeded, want an error", args)
 		}
 	}

@@ -42,10 +42,10 @@ in the file is rejected for the same reason: only the first would be read.
 Durations must carry a unit (`30s`, not `30`), and every validation problem
 is reported at once.
 
-A check's type comes from which block it sets (`http:`, `tcp:`, `dns:` or
-`tls:`) instead of a separate `type:` field, so a type and its settings can
-never disagree. Shared settings use YAML anchors rather than a custom
-`defaults:` section.
+A check's type comes from which block it sets (`http:`, `steps:`, `tcp:`,
+`dns:`, `tls:` or `heartbeat:`) instead of a separate `type:` field, so a
+type and its settings can never disagree. Shared settings use YAML anchors
+rather than a custom `defaults:` section.
 
 The check `name` is its identity: config reloads, metrics, history and alert
 state are all keyed by it.
@@ -81,8 +81,10 @@ and is not the target's fault.
 ## One resolver for every probe, released as soon as a probe gives up
 
 All probes resolve names with Go's own DNS client rather than the platform's
-(`PreferGo`). It behaves the same on macOS and in the Linux container, has no
-cache, so every probe sends real queries, and honours the probe's context.
+(`PreferGo`). It behaves the same on macOS and in the Linux container, keeps
+no cache of its own and honours the probe's context. Probes still resolve
+through the system resolver, the nameservers in `resolv.conf`, which may
+cache answers: in Kubernetes that is the cluster DNS.
 
 The goroutine leak tests found one gap: when a probe times out, Go's resolver
 cancels the lookup, but the UDP read in flight is bounded only by its
@@ -240,7 +242,8 @@ on every series, a reload changing a check from TCP to HTTP would leave the
 TCP series behind, frozen at their last value. When a check is removed, its
 series are deleted once its last probe has finished; deleting them at the
 moment of the reload would let that probe recreate them, stale for good.
-Failure reasons are a fixed set of ten, so label cardinality stays bounded.
+Failure reasons are a fixed set of eleven, plus `canceled`, so label
+cardinality stays bounded.
 
 ## One alert per incident: thresholds and a state machine
 
@@ -350,7 +353,7 @@ Failures are described by reason ("Connection failed", "Timed out").
 
 A few details that are easy to get wrong:
 
-- Availability is rounded *down*, so 99.996% shows as 99.995%, never as 100%.
+- Availability is rounded *down*, so 99.9996% shows as 99.999%, never as 100%.
 - An exhausted error budget is described in probes ("12 failed probes, 1
   allowed"), because a percentage over a short window reads "overspent by
   35966%".
