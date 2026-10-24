@@ -32,6 +32,10 @@ const (
 // It ends only once enough probes in a row have succeeded and the budget
 // has stopped burning, so a check failing on and off stays in one incident
 // rather than alerting and recovering over and over.
+//
+// A burn rule counts failures over hours, so it can still fire after the
+// incident those failures caused has recovered. The state remembers when
+// the last incident ended so that such a burn doesn't open a second one.
 type State struct {
 	// Firing is true from the alert until the recovery notice.
 	Firing bool
@@ -48,18 +52,24 @@ type State struct {
 	// LastReason and LastError describe the most recent failure.
 	LastReason probe.Reason
 	LastError  string
+	// RecoveredAt is when probes began succeeding at the end of the check's
+	// last incident, and FailedAgainAt when the first probe after that
+	// failed; both are zero if there is no such time.
+	RecoveredAt   time.Time
+	FailedAgainAt time.Time
 }
 
 // IsZero reports whether s is the healthy state with nothing to remember.
 func (s State) IsZero() bool {
-	return !s.Firing && !s.Burning && s.Streak == 0
+	return !s.Firing && !s.Burning && s.Streak == 0 && s.RecoveredAt.IsZero()
 }
 
 // Equal reports whether s and o are the same state.
 func (s State) Equal(o State) bool {
 	return s.Firing == o.Firing && s.Burning == o.Burning && s.Streak == o.Streak &&
 		s.StreakStart.Equal(o.StreakStart) && s.FiringSince.Equal(o.FiringSince) &&
-		s.LastReason == o.LastReason && s.LastError == o.LastError
+		s.LastReason == o.LastReason && s.LastError == o.LastError &&
+		s.RecoveredAt.Equal(o.RecoveredAt) && s.FailedAgainAt.Equal(o.FailedAgainAt)
 }
 
 // Notification announces a change in a check's alerting state.
@@ -109,9 +119,12 @@ func Next(s State, r scheduler.Result, t Thresholds) (State, *Notification) {
 	}
 	switch {
 	case !s.Firing && ok:
-		return State{}, nil
+		return State{RecoveredAt: s.RecoveredAt, FailedAgainAt: s.FailedAgainAt}, nil
 
 	case !s.Firing: // failed
+		if !s.RecoveredAt.IsZero() && s.FailedAgainAt.IsZero() {
+			s.FailedAgainAt = r.Start
+		}
 		if s.Streak == 0 {
 			s.StreakStart = r.Start
 		}
@@ -123,6 +136,7 @@ func Next(s State, r scheduler.Result, t Thresholds) (State, *Notification) {
 			Probes: s.Streak, Reason: s.LastReason, Error: s.LastError}
 		s.Firing, s.FiringSince = true, s.StreakStart
 		s.Streak, s.StreakStart = 0, time.Time{}
+		s.RecoveredAt, s.FailedAgainAt = time.Time{}, time.Time{}
 		return s, n
 
 	case !ok: // failed while firing: any recovery streak starts over
@@ -137,7 +151,7 @@ func Next(s State, r scheduler.Result, t Thresholds) (State, *Notification) {
 		if s.Streak < t.Successes || s.Burning {
 			return s, nil
 		}
-		return State{}, recovery(r.Check, r.Start, s)
+		return recovered(s), recovery(r.Check, r.Start, s)
 	}
 }
 
@@ -145,12 +159,24 @@ func Next(s State, r scheduler.Result, t Thresholds) (State, *Notification) {
 // is s: b is the burn rule that fires, or nil if none does. A burn raises
 // an alert if the check isn't firing already, and once it clears, a
 // recovery it was holding back goes out.
+//
+// Burn rules are evaluated apart from the probe results, so a burn can
+// arrive after the incident its failures caused has recovered. If none of
+// the probes since the recovery failed, the burn is ignored; otherwise the
+// new incident begins at the first that did, not inside the last one.
 func NextBurn(s State, check string, b *Burn, at time.Time, t Thresholds) (State, *Notification) {
 	switch {
 	case b != nil && !s.Firing:
-		n := &Notification{Kind: KindAlert, Check: check, At: at, Since: b.Since,
+		since := b.Since
+		if since.Before(s.RecoveredAt) {
+			if s.FailedAgainAt.IsZero() {
+				return s, nil
+			}
+			since = s.FailedAgainAt
+		}
+		n := &Notification{Kind: KindAlert, Check: check, At: at, Since: since,
 			Reason: s.LastReason, Error: s.LastError, Burn: b}
-		return State{Firing: true, Burning: true, FiringSince: b.Since, LastReason: s.LastReason, LastError: s.LastError}, n
+		return State{Firing: true, Burning: true, FiringSince: since, LastReason: s.LastReason, LastError: s.LastError}, n
 	case b != nil:
 		s.Burning = true
 		return s, nil
@@ -159,9 +185,14 @@ func NextBurn(s State, check string, b *Burn, at time.Time, t Thresholds) (State
 	}
 	s.Burning = false
 	if s.Firing && s.Streak >= t.Successes {
-		return State{}, recovery(check, at, s)
+		return recovered(s), recovery(check, at, s)
 	}
 	return s, nil
+}
+
+// recovered returns the healthy state after s's incident recovers.
+func recovered(s State) State {
+	return State{RecoveredAt: s.StreakStart}
 }
 
 // recovery returns the recovery notice ending s's incident.

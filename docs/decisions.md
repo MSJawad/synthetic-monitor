@@ -279,6 +279,15 @@ minutes after the check is healthy again. It says when probes started
 passing, so the real recovery time isn't lost. The burning flag is saved with
 the rest of the alert state, so a restart doesn't end an incident early.
 
+Burn rules are evaluated every 30 seconds, apart from the probe results, so
+an outage short enough to alert and recover between two evaluations is still
+in the rules' windows at the next one. The alert state therefore remembers
+when the check's last incident ended. A burn whose failures all came before
+that is ignored rather than raising a second alert for the same outage; one
+that also counts failures since opens a new incident, which begins at the
+first of them, so incidents never overlap. That memory is saved too, so a
+check that has recovered from an incident keeps its row of alert state.
+
 ## Notifications go through an outbox
 
 Each state change and the notification it calls for are saved to SQLite in

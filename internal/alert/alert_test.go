@@ -95,8 +95,8 @@ func TestNotificationContents(t *testing.T) {
 	if recovery.Since != alert.Since || recovery.Until != probeAt(7, false).Start || recovery.Probes != 2 {
 		t.Errorf("recovery = %+v; want since the incident began, until probe 7: the success that started the streak", recovery)
 	}
-	if !s.IsZero() {
-		t.Errorf("state after recovery = %+v, want the zero state", s)
+	if !s.Equal(State{RecoveredAt: recovery.Until}) {
+		t.Errorf("state after recovery = %+v, want healthy, remembering when it recovered", s)
 	}
 }
 
@@ -166,7 +166,8 @@ func TestBurningHoldsTheRecoveryUntilItClears(t *testing.T) {
 	}
 	at := probeAt(8, false).Start
 	s, n = NextBurn(s, "web", nil, at, th)
-	if n == nil || n.Kind != KindRecovery || !n.Until.Equal(probeAt(4, false).Start) || !n.At.Equal(at) || !s.IsZero() {
+	if n == nil || n.Kind != KindRecovery || !n.Until.Equal(probeAt(4, false).Start) || !n.At.Equal(at) ||
+		!s.Equal(State{RecoveredAt: n.Until}) {
 		t.Errorf("burn cleared: state %+v, notification %+v; want the held recovery, back since probe 4", s, n)
 	}
 
@@ -174,6 +175,69 @@ func TestBurningHoldsTheRecoveryUntilItClears(t *testing.T) {
 	s = State{Firing: true, Burning: true, FiringSince: t0}
 	if s, n = NextBurn(s, "web", nil, at, th); n != nil || !s.Firing || s.Burning {
 		t.Errorf("burn cleared while failing: state %+v, notification %+v; want still firing, nothing sent", s, n)
+	}
+}
+
+// TestBurnAfterRecovery replays an outage that alerts and recovers before
+// the next SLO evaluation, which then finds the burn rule firing on the
+// outage's failures.
+func TestBurnAfterRecovery(t *testing.T) {
+	th := Thresholds{3, 2}
+	outage := func() State {
+		t.Helper()
+		_, sent, s := replay("FFFFSS", th)
+		if len(sent) != 2 || sent[1].Kind != KindRecovery {
+			t.Fatalf("outage sent %+v; want an alert and a recovery", sent)
+		}
+		return s
+	}
+	recoveredAt := probeAt(4, false).Start
+	stale := &Burn{Failed: 4, Total: 6, Window: time.Hour, Rate: 50, Since: probeAt(0, true).Start}
+
+	// Only the outage's failures: the incident is over, nothing is sent.
+	s := outage()
+	at := probeAt(6, false).Start
+	next, n := NextBurn(s, "web", stale, at, th)
+	if n != nil || next.Firing || next.Burning {
+		t.Errorf("stale burn: state %+v, notification %+v; want nothing sent and the check healthy", next, n)
+	}
+	// Nor when it is still firing on later evaluations.
+	if s, n = Next(next, probeAt(6, false), th); n != nil {
+		t.Fatalf("success after the stale burn sent %+v", n)
+	}
+	if next, n = NextBurn(s, "web", stale, probeAt(7, false).Start, th); n != nil || next.Firing {
+		t.Errorf("stale burn again: state %+v, notification %+v; want nothing sent", next, n)
+	}
+
+	// Failures after the recovery are a new incident, which begins at the
+	// first of them rather than inside the last one.
+	s = outage()
+	for i, fail := range []bool{true, false, true, false} {
+		if s, n = Next(s, probeAt(6+i, fail), th); n != nil {
+			t.Fatalf("probe %d sent %+v; want failures on and off to stay below the threshold", 6+i, n)
+		}
+	}
+	at = probeAt(10, false).Start
+	next, n = NextBurn(s, "web", stale, at, th)
+	if n == nil || n.Kind != KindAlert || n.Burn != stale || !n.Since.Equal(probeAt(6, true).Start) ||
+		!next.Firing || !next.FiringSince.Equal(n.Since) {
+		t.Errorf("burn with new failures: state %+v, notification %+v; want an alert since probe 6", next, n)
+	}
+	if !n.Since.After(recoveredAt) {
+		t.Errorf("new incident since %v overlaps the last, which ended at %v", n.Since, recoveredAt)
+	}
+
+	// A burn whose failures all came after the recovery alerts as usual.
+	s = outage()
+	fresh := &Burn{Failed: 2, Total: 4, Window: time.Hour, Rate: 50, Since: probeAt(6, true).Start}
+	if next, n = NextBurn(s, "web", fresh, at, th); n == nil || !n.Since.Equal(fresh.Since) || !next.Firing {
+		t.Errorf("fresh burn: state %+v, notification %+v; want an alert since its first failure", next, n)
+	}
+
+	// Once the next incident has alerted, its recovery is what counts.
+	_, sent, _ := replay("FFFFSSFFFS", th)
+	if len(sent) != 3 || sent[2].Kind != KindAlert {
+		t.Fatalf("second outage sent %+v; want alert, recovery, alert", sent)
 	}
 }
 

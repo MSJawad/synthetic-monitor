@@ -41,8 +41,8 @@ func TestManagerAlertsOnceAndRecoversOnce(t *testing.T) {
 		if got := obs.firingChanges(); got != "web:true,web:false" {
 			t.Errorf("firing changes %s, want web:true,web:false", got)
 		}
-		if len(store.pending()) != 0 || len(store.states) != 0 {
-			t.Errorf("after recovery: %d pending, %d states; want an empty outbox and no state", len(store.pending()), len(store.states))
+		if s := store.states["web"]; len(store.pending()) != 0 || s.Firing || s.RecoveredAt.IsZero() {
+			t.Errorf("after recovery: %d pending, state %+v; want an empty outbox and the recovery remembered", len(store.pending()), s)
 		}
 		closeManager(t, m)
 	})
@@ -313,8 +313,40 @@ func TestManagerBurnHoldsRecoveryUntilItClears(t *testing.T) {
 
 		m.SetBurns(map[string]*Burn{"web": nil})
 		synctest.Wait()
-		if got := notifier.kinds(); got != "alert,recovery" || len(store.states) != 0 {
-			t.Errorf("burn cleared: delivered %s, %d states; want the recovery and no state", got, len(store.states))
+		if got, s := notifier.kinds(), store.states["web"]; got != "alert,recovery" || s.Firing || s.Burning {
+			t.Errorf("burn cleared: delivered %s, state %+v; want the recovery and the check healthy", got, s)
+		}
+		closeManager(t, m)
+	})
+}
+
+func TestManagerIgnoresBurnOfRecoveredOutage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, notifier := newMemStore(), &fakeNotifier{}
+		web := check("web")
+		web.SLO = &config.SLO{Target: 99.5, WindowDays: 30}
+		m := start(t, store, notifier, nil, web)
+
+		// The outage alerts and recovers between two SLO evaluations; the
+		// next one counts its failures.
+		outageStart := time.Now()
+		feed(m, "web", "FFFFSS")
+		m.SetBurns(map[string]*Burn{"web": {Failed: 4, Total: 6, Window: time.Hour, Rate: 133, Since: outageStart}})
+		synctest.Wait()
+		if got := notifier.kinds(); got != "alert,recovery" {
+			t.Errorf("delivered %s; want one alert and one recovery", got)
+		}
+		if f := m.Firing(); len(f) != 0 {
+			t.Errorf("Firing() = %v; want none after the recovery", f)
+		}
+		closeManager(t, m)
+
+		// The recovery is remembered across a restart.
+		m = start(t, store, notifier, nil, web)
+		m.SetBurns(map[string]*Burn{"web": {Failed: 4, Total: 7, Window: time.Hour, Rate: 114, Since: outageStart}})
+		synctest.Wait()
+		if got := notifier.kinds(); got != "alert,recovery" {
+			t.Errorf("after a restart: delivered %s; want nothing more", got)
 		}
 		closeManager(t, m)
 	})
