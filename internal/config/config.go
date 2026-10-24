@@ -189,8 +189,9 @@ func (c Check) Type() string {
 
 // Parse decodes a config, applies defaults and validates it, looking up
 // the variables that templates refer to in env. Unknown fields are errors,
-// so a misspelt option fails loudly instead of being ignored. All
-// validation problems are reported together.
+// so a misspelt option fails loudly instead of being ignored, and so is a
+// second YAML document, which would be ignored too. All validation
+// problems are reported together.
 func Parse(data []byte, env Env) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -200,6 +201,12 @@ func Parse(data []byte, env Env) (*Config, error) {
 			return nil, errors.New("config is empty")
 		}
 		return nil, err
+	}
+	if err := dec.Decode(new(yaml.Node)); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("config has more than one YAML document: put every check in the first")
 	}
 	for i := range cfg.Checks {
 		cfg.Checks[i].applyDefaults()

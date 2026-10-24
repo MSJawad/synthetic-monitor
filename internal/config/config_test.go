@@ -147,6 +147,14 @@ func TestParseRejectsInvalidConfig(t *testing.T) {
 		wantErr string
 	}{
 		{"empty file", ``, "config is empty"},
+		{"second document", `
+checks:
+  - name: a
+    tcp: {address: "a:1"}
+---
+checks:
+  - name: b
+    tcp: {address: "b:1"}`, "config has more than one YAML document: put every check in the first"},
 		{"unknown field", `
 checks:
   - name: a

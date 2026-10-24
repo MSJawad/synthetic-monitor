@@ -37,8 +37,10 @@ same parser and adds a conversion step.
 
 Unknown fields are rejected. A typo such as `timout: 5s` would otherwise be
 silently ignored and the check would run with the default timeout, which is
-the kind of bug that only shows up during an incident. Durations must carry a
-unit (`30s`, not `30`), and every validation problem is reported at once.
+the kind of bug that only shows up during an incident. A second YAML document
+in the file is rejected for the same reason: only the first would be read.
+Durations must carry a unit (`30s`, not `30`), and every validation problem
+is reported at once.
 
 A check's type comes from which block it sets (`http:`, `tcp:`, `dns:` or
 `tls:`) instead of a separate `type:` field, so a type and its settings can
