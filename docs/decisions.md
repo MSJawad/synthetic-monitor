@@ -579,8 +579,11 @@ the alarm, which is exactly what log-based alarms treat as all clear.
 The check is still run by the scheduler on its interval, so heartbeats reuse
 everything else: thresholds, alerting, SLOs, history and the status page,
 where they show when the last ping came instead of a latency. Until the
-first ping, the clock starts when the check does, so a job that never pings
-fails rather than staying grey forever.
+first ping, the clock starts when the check was first configured, so a job
+that never pings fails rather than staying grey forever. That time is saved
+with the pings, so it holds across restarts and edits of the check; counted
+from each start instead, a check would stay green for as long as deploys came
+more often than its period and grace.
 
 - **The ping is saved before it is acknowledged.** A `204` means the ping is
   in SQLite and survives a restart; if it cannot be saved the job gets a

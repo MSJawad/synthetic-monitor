@@ -245,6 +245,14 @@ func (s *service) serve(ctx context.Context, ln net.Listener, cfg *config.Config
 		current.Store(cfg)
 		m.SetChecks(cfg.Checks)
 		alerts.SetChecks(cfg.Checks) // before probing starts, so new checks' thresholds are known
+		for _, c := range cfg.Checks {
+			if c.Heartbeat == nil {
+				continue
+			}
+			if err := pings.Register(context.WithoutCancel(ctx), c.Name, time.Now()); err != nil {
+				logger.Error("saving when a heartbeat check was added", "check", c.Name, "err", err)
+			}
+		}
 		sched.Apply(cfg.Checks)
 		m.ConfigLoaded(true)
 	}
