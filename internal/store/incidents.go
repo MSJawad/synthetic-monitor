@@ -23,10 +23,10 @@ type Incident struct {
 }
 
 // Incidents returns the incidents that are open or ended at or after
-// since, newest first.
+// since: the open ones first, then the rest, each newest first.
 func (s *Store) Incidents(ctx context.Context, since time.Time) ([]Incident, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT check_name, started_at, ended_at, burn, reason FROM incidents
-		WHERE ended_at IS NULL OR ended_at >= ? ORDER BY started_at DESC, rowid DESC`, since.UnixMilli())
+		WHERE ended_at IS NULL OR ended_at >= ? ORDER BY ended_at IS NOT NULL, started_at DESC, rowid DESC`, since.UnixMilli())
 	if err != nil {
 		return nil, err
 	}

@@ -66,8 +66,8 @@ type Source struct {
 	// Days returns a check's daily probe totals from the day containing
 	// since, oldest first.
 	Days func(ctx context.Context, check string, since time.Time) ([]store.Day, error)
-	// Incidents returns the incidents open or ended since a time, newest
-	// first.
+	// Incidents returns the incidents open or ended since a time: the
+	// open ones first, then the rest, each newest first.
 	Incidents func(ctx context.Context, since time.Time) ([]store.Incident, error)
 }
 
@@ -120,8 +120,8 @@ type apiStatus struct {
 	Status    state      `json:"status"`
 	Generated time.Time  `json:"generated"`
 	Checks    []apiCheck `json:"checks"`
-	// Incidents are those open or ended over the days the page shows,
-	// newest first.
+	// Incidents are those open or ended over the days the page shows:
+	// the open ones first, then the rest, each newest first.
 	Incidents []apiIncident `json:"incidents"`
 }
 
