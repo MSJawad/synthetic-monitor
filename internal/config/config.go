@@ -118,6 +118,13 @@ func (h *HTTP) Follows() bool {
 	return h.FollowRedirects == nil || *h.FollowRedirects
 }
 
+// followedRedirects are the statuses net/http follows when redirects are
+// followed. Any other 3xx response is returned like any other.
+var followedRedirects = []int{
+	http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+	http.StatusTemporaryRedirect, http.StatusPermanentRedirect,
+}
+
 // MaxSteps limits a multi-step check, which shares one timeout.
 const MaxSteps = 10
 
@@ -422,7 +429,7 @@ func (h *HTTP) validate(checkVar func(name string) error) []error {
 		switch {
 		case code < 100 || code > 599:
 			fail("expect_status %d is not a valid HTTP status code", code)
-		case code >= 300 && code <= 399 && h.Follows():
+		case h.Follows() && slices.Contains(followedRedirects, code):
 			fail("expect_status %d is a redirect, which is followed: set follow_redirects: false to expect it", code)
 		}
 	}

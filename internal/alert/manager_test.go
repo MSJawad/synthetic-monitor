@@ -328,10 +328,15 @@ func TestManagerIgnoresBurnOfRecoveredOutage(t *testing.T) {
 		m := start(t, store, notifier, nil, web)
 
 		// The outage alerts and recovers between two SLO evaluations; the
-		// next one counts its failures.
+		// next ones count its failures.
 		outageStart := time.Now()
 		feed(m, "web", "FFFFSS")
+		synctest.Wait()
+		saves := store.saveCount()
 		m.SetBurns(map[string]*Burn{"web": {Failed: 4, Total: 6, Window: time.Hour, Rate: 133, Since: outageStart}})
+		synctest.Wait()
+		feed(m, "web", "S")
+		m.SetBurns(map[string]*Burn{"web": {Failed: 4, Total: 7, Window: time.Hour, Rate: 114, Since: outageStart}})
 		synctest.Wait()
 		if got := notifier.kinds(); got != "alert,recovery" {
 			t.Errorf("delivered %s; want one alert and one recovery", got)
@@ -339,11 +344,14 @@ func TestManagerIgnoresBurnOfRecoveredOutage(t *testing.T) {
 		if f := m.Firing(); len(f) != 0 {
 			t.Errorf("Firing() = %v; want none after the recovery", f)
 		}
+		if n := store.saveCount() - saves; n != 0 {
+			t.Errorf("the stale burns and the success between them saved the alert state %d times; want it left as the recovery saved it", n)
+		}
 		closeManager(t, m)
 
 		// The recovery is remembered across a restart.
 		m = start(t, store, notifier, nil, web)
-		m.SetBurns(map[string]*Burn{"web": {Failed: 4, Total: 7, Window: time.Hour, Rate: 114, Since: outageStart}})
+		m.SetBurns(map[string]*Burn{"web": {Failed: 4, Total: 8, Window: time.Hour, Rate: 100, Since: outageStart}})
 		synctest.Wait()
 		if got := notifier.kinds(); got != "alert,recovery" {
 			t.Errorf("after a restart: delivered %s; want nothing more", got)
@@ -418,6 +426,7 @@ type memStore struct {
 	states    map[string]State
 	outbox    []Notification
 	nextID    int64
+	saves     int           // how many saves succeeded
 	failSaves int           // fail this many saves
 	block     chan struct{} // if set, saves wait for it to close
 	gate      chan struct{} // if set, reads of the outbox return only once it closes, with what they saw before
@@ -441,6 +450,7 @@ func (s *memStore) SaveAlertState(_ context.Context, check string, st State, n *
 		s.failSaves--
 		return errors.New("disk I/O error")
 	}
+	s.saves++
 	if st.IsZero() {
 		delete(s.states, check)
 	} else {
@@ -467,6 +477,12 @@ func (s *memStore) pending() []Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.outbox)
+}
+
+func (s *memStore) saveCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saves
 }
 
 func (s *memStore) DeleteNotification(_ context.Context, id int64) error {

@@ -64,8 +64,10 @@ Redirects are followed, as a browser would follow them, including to other
 hosts, and `expect_status` and `body_contains` apply to the final response.
 A check that should see the redirect itself, such as one making sure plain
 HTTP sends visitors to HTTPS, sets `follow_redirects: false` and expects the
-redirect's status. A 3xx code in `expect_status` is rejected unless it does,
-since a followed redirect never ends in one.
+redirect's status. The statuses the client follows (301, 302, 303, 307 and
+308) are rejected in `expect_status` unless it does, since a followed
+redirect never ends in one. Other 3xx codes, such as `304 Not Modified`, are
+not followed and can be expected either way.
 
 ## One wrapper owns timeouts
 

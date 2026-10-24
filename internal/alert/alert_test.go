@@ -226,6 +226,9 @@ func TestBurnAfterRecovery(t *testing.T) {
 	if !n.Since.After(recoveredAt) {
 		t.Errorf("new incident since %v overlaps the last, which ended at %v", n.Since, recoveredAt)
 	}
+	if _, body, _, _ := render(*n); !strings.Contains(body, "failed; failing again since 2026-10-21 14:03:00 UTC.") {
+		t.Errorf("body %q does not say the check is failing again since probe 6", body)
+	}
 
 	// A burn whose failures all came after the recovery alerts as usual.
 	s = outage()
@@ -310,11 +313,22 @@ func TestRenderAlertAfterOneFailure(t *testing.T) {
 }
 
 func TestRenderBurnAlert(t *testing.T) {
-	n := Notification{Kind: KindAlert, Check: "web", Burn: burn, Reason: probe.ReasonHTTPStatus, Error: "status 500, want 2xx"}
+	n := Notification{Kind: KindAlert, Check: "web", Since: burn.Since, Burn: burn, Reason: probe.ReasonHTTPStatus, Error: "status 500, want 2xx"}
 	title, body, priority, _ := render(n)
 	want := "20 of the 120 probes in the last hour failed, the first at 2026-10-21 14:00:00 UTC. " +
 		"That spends the error budget 33 times as fast as the SLO allows.\nLatest failure (http_status): status 500, want 2xx"
 	if title != "web is failing on and off" || body != want || priority != "high" {
 		t.Errorf("render = %q, %q, %q", title, body, priority)
+	}
+
+	// A burn still counting an outage that has recovered opens its incident
+	// at the first failure since, so the body names that time, not the
+	// window's first failure, which the count still includes.
+	n.Since = t0.Add(6 * time.Minute)
+	_, body, _, _ = render(n)
+	want = "20 of the 120 probes in the last hour failed; failing again since 2026-10-21 14:06:00 UTC. " +
+		"That spends the error budget 33 times as fast as the SLO allows.\nLatest failure (http_status): status 500, want 2xx"
+	if body != want {
+		t.Errorf("body after a recovery = %q, want %q", body, want)
 	}
 }

@@ -111,12 +111,25 @@ checks:
     http: {url: "http://a"}
   - name: redirects
     http: {url: "http://a", expect_status: [301], follow_redirects: false}
+  - name: not-modified
+    http: {url: "http://a", expect_status: [300, 304, 305, 306]}
 `), noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if follows, redirects := cfg.Checks[0].HTTP, cfg.Checks[1].HTTP; !follows.Follows() || redirects.Follows() {
 		t.Errorf("Follows() = %t, %t; want true by default and false when set so", follows.Follows(), redirects.Follows())
+	}
+	if notModified := cfg.Checks[2].HTTP; !notModified.Follows() {
+		t.Errorf("a check expecting 3xx codes that are not followed: Follows() = false, want true")
+	}
+
+	// Only the redirects the client follows can never be seen.
+	for _, code := range []int{301, 302, 303, 307, 308} {
+		_, err := Parse(fmt.Appendf(nil, "checks:\n  - name: a\n    http: {url: \"http://a\", expect_status: [%d]}\n", code), noEnv)
+		if want := fmt.Sprintf("expect_status %d is a redirect, which is followed", code); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("expect_status [%d] while following redirects: error %v; want %q", code, err, want)
+		}
 	}
 }
 

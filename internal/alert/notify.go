@@ -109,9 +109,13 @@ func render(n Notification) (title, body, priority, tags string) {
 	switch n.Kind {
 	case KindAlert:
 		if b := n.Burn; b != nil {
-			body = fmt.Sprintf("%d of the %d probes in the last %s failed, the first at %s. "+
-				"That spends the error budget %.0f times as fast as the SLO allows.",
-				b.Failed, b.Total, window(b.Window), stamp(b.Since), b.Rate)
+			body = fmt.Sprintf("%d of the %d probes in the last %s failed", b.Failed, b.Total, window(b.Window))
+			if n.Since.Equal(b.Since) {
+				body += fmt.Sprintf(", the first at %s.", stamp(b.Since))
+			} else {
+				body += fmt.Sprintf("; failing again since %s.", stamp(n.Since))
+			}
+			body += fmt.Sprintf(" That spends the error budget %.0f times as fast as the SLO allows.", b.Rate)
 			if n.Reason != "" {
 				body += fmt.Sprintf("\nLatest failure (%s): %s", n.Reason, n.Error)
 			}

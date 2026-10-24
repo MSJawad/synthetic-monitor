@@ -289,6 +289,9 @@ func (m *Manager) evaluateBurns(ctx context.Context, burns map[string]*Burn, at 
 			in.LastReason, in.LastError = f.reason, f.err
 		}
 		next, n := NextBurn(in, check, b, at, t)
+		if n == nil && next.Equal(in) {
+			next = prev
+		}
 		m.save(ctx, check, prev, next, n)
 	}
 }
