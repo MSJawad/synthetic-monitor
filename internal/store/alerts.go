@@ -39,9 +39,9 @@ func (s *Store) AlertStates(ctx context.Context) (map[string]alert.State, error)
 	return states, rows.Err()
 }
 
-// SaveAlertState stores check's alerting state, deleting it if st is
-// healthy, and adds n, if not nil, to the outbox and to the check's
-// incident history. All of it happens in one transaction, so a crash
+// SaveAlertState stores check's alerting state, deleting it if st has
+// nothing to remember, and adds n, if not nil, to the outbox and to the
+// check's incident history. All of it happens in one transaction, so a crash
 // cannot record a state change without the notification it calls for, or
 // the other way round.
 func (s *Store) SaveAlertState(ctx context.Context, check string, st alert.State, n *alert.Notification) error {

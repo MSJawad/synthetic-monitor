@@ -69,8 +69,8 @@ type Options struct {
 	// Env supplies the variables request templates refer to. Nil uses the
 	// process environment.
 	Env config.Env
-	// Pings tells heartbeat checks when they were last pinged. Nil means
-	// never.
+	// Pings tells heartbeat checks when they were last pinged, and when they
+	// were first configured. Nil means never pinged.
 	Pings Pings
 }
 

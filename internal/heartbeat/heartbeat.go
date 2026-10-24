@@ -32,8 +32,9 @@ type Registry struct {
 	seen   map[string]time.Time
 }
 
-// New loads the pings saved in store. onPing, if not nil, is told of each
-// of them and of every ping after, for metrics.
+// New loads the pings saved in store, and when each check was first
+// configured. onPing, if not nil, is told of each ping saved and of every
+// ping after, for metrics.
 func New(ctx context.Context, store Store, onPing func(check string, at time.Time)) (*Registry, error) {
 	last, err := store.Heartbeats(ctx)
 	if err != nil {
