@@ -214,6 +214,11 @@ func TestMonitor(t *testing.T) {
 	}
 	cancel()
 	waitForStatus(t, base+"/readyz", http.StatusServiceUnavailable)
+	// Readiness turns off before shutdown counts the probes in flight, so
+	// the probe is held until it has.
+	logs.waitFor(t, "shutdown to wait for the probe in flight", func(e []logEntry) bool {
+		return index(e, "waiting for probes in flight") >= 0
+	})
 	close(release)
 	select {
 	case err := <-done:
