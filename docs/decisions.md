@@ -58,6 +58,13 @@ The cost is a little more work per probe, which is negligible at monitoring
 rates. `httptrace` splits each probe's time into DNS, connect, TLS, server
 processing and transfer, so a slow probe shows where the time went.
 
+Redirects are followed, as a browser would follow them, including to other
+hosts, and `expect_status` and `body_contains` apply to the final response.
+A check that should see the redirect itself, such as one making sure plain
+HTTP sends visitors to HTTPS, sets `follow_redirects: false` and expects the
+redirect's status. A 3xx code in `expect_status` is rejected unless it does,
+since a followed redirect never ends in one.
+
 ## One wrapper owns timeouts
 
 Each probe type only knows how to do its own work and classify its own

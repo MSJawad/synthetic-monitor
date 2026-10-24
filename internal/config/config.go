@@ -107,6 +107,15 @@ type HTTP struct {
 	ExpectStatus []int `yaml:"expect_status"`
 	// BodyContains, if set, must appear in the response body.
 	BodyContains string `yaml:"body_contains"`
+	// FollowRedirects, true unless set to false, follows redirects, even to
+	// other hosts, and checks the final response. False checks the first
+	// response, so a check can expect a redirect status.
+	FollowRedirects *bool `yaml:"follow_redirects"`
+}
+
+// Follows reports whether the request follows redirects.
+func (h *HTTP) Follows() bool {
+	return h.FollowRedirects == nil || *h.FollowRedirects
 }
 
 // MaxSteps limits a multi-step check, which shares one timeout.
@@ -403,8 +412,11 @@ func (h *HTTP) validate(checkVar func(name string) error) []error {
 	}
 	template("body", h.Body)
 	for _, code := range h.ExpectStatus {
-		if code < 100 || code > 599 {
+		switch {
+		case code < 100 || code > 599:
 			fail("expect_status %d is not a valid HTTP status code", code)
+		case code >= 300 && code <= 399 && h.Follows():
+			fail("expect_status %d is a redirect, which is followed: set follow_redirects: false to expect it", code)
 		}
 	}
 	return errs

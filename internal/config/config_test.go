@@ -104,6 +104,22 @@ checks:
 	}
 }
 
+func TestParseFollowRedirects(t *testing.T) {
+	cfg, err := Parse([]byte(`
+checks:
+  - name: follows
+    http: {url: "http://a"}
+  - name: redirects
+    http: {url: "http://a", expect_status: [301], follow_redirects: false}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if follows, redirects := cfg.Checks[0].HTTP, cfg.Checks[1].HTTP; !follows.Follows() || redirects.Follows() {
+		t.Errorf("Follows() = %t, %t; want true by default and false when set so", follows.Follows(), redirects.Follows())
+	}
+}
+
 func TestParseSupportsAnchorsForSharedSettings(t *testing.T) {
 	cfg, err := Parse([]byte(`
 checks:
@@ -195,6 +211,17 @@ checks:
 checks:
   - name: a
     http: {url: "http://a", expect_status: [700]}`, "http.expect_status 700"},
+		{"redirect status while following redirects", `
+checks:
+  - name: a
+    http: {url: "http://a", expect_status: [200, 301]}`,
+			"http.expect_status 301 is a redirect, which is followed: set follow_redirects: false to expect it"},
+		{"redirect status in a step while following redirects", `
+checks:
+  - name: a
+    steps:
+      - {name: home, url: "http://a", expect_status: [302], follow_redirects: true}`,
+			`steps[0] "home": expect_status 302 is a redirect`},
 		{"address without port", `
 checks:
   - name: a

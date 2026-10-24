@@ -76,12 +76,13 @@ type request struct {
 	body         string
 	expectStatus []int
 	bodyContains []byte
+	follow       bool // whether redirects are followed
 }
 
 func newRequest(c *config.HTTP) request {
 	return request{
 		url: c.URL, method: c.Method, headers: c.Headers, body: c.Body,
-		expectStatus: c.ExpectStatus, bodyContains: []byte(c.BodyContains),
+		expectStatus: c.ExpectStatus, bodyContains: []byte(c.BodyContains), follow: c.Follows(),
 	}
 }
 
@@ -108,6 +109,11 @@ func (q *request) do(ctx context.Context, client *http.Client, lookup func(name 
 		req.Header.Set(name, value)
 	}
 
+	if !q.follow {
+		c := *client
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &c
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{Reason: classify(err), Err: err, Phases: timer.phases(time.Now())}, nil
