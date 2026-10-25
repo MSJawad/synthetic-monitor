@@ -18,11 +18,12 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-// memStore keeps pings in memory and can be made to fail.
+// memStore keeps pings and registrations in memory and can be made to fail.
 type memStore struct {
-	mu    sync.Mutex
-	pings map[string]time.Time
-	fail  bool
+	mu         sync.Mutex
+	pings      map[string]time.Time
+	registered map[string]time.Time
+	fail       bool
 }
 
 func (s *memStore) Heartbeats(context.Context) (map[string]time.Time, error) {
@@ -41,10 +42,32 @@ func (s *memStore) SaveHeartbeat(_ context.Context, check string, at time.Time) 
 	return nil
 }
 
+func (s *memStore) HeartbeatRegistrations(context.Context) (map[string]time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.registered), nil
+}
+
+func (s *memStore) RegisterHeartbeat(_ context.Context, check string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail {
+		return errors.New("disk I/O error")
+	}
+	if s.registered == nil {
+		s.registered = make(map[string]time.Time)
+	}
+	if _, ok := s.registered[check]; !ok {
+		s.registered[check] = at
+	}
+	return nil
+}
+
 func (s *memStore) DeleteHeartbeat(_ context.Context, check string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.pings, check)
+	delete(s.registered, check)
 	return nil
 }
 
@@ -73,7 +96,11 @@ type emptyStore struct{}
 
 func (emptyStore) Heartbeats(context.Context) (map[string]time.Time, error) { return nil, nil }
 func (emptyStore) SaveHeartbeat(context.Context, string, time.Time) error   { return nil }
-func (emptyStore) DeleteHeartbeat(context.Context, string) error            { return nil }
+func (emptyStore) HeartbeatRegistrations(context.Context) (map[string]time.Time, error) {
+	return nil, nil
+}
+func (emptyStore) RegisterHeartbeat(context.Context, string, time.Time) error { return nil }
+func (emptyStore) DeleteHeartbeat(context.Context, string) error              { return nil }
 
 func TestRegistryFromEmptyStore(t *testing.T) {
 	r, err := New(t.Context(), emptyStore{}, nil)
@@ -85,6 +112,59 @@ func TestRegistryFromEmptyStore(t *testing.T) {
 	}
 	if at, ok := r.LastPing("cron"); !ok || !at.Equal(earlier) {
 		t.Errorf("LastPing = %v, %v; want the ping", at, ok)
+	}
+	if err := r.Register(t.Context(), "cron", earlier); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := r.FirstSeen("cron"); !ok || !at.Equal(earlier) {
+		t.Errorf("FirstSeen = %v, %v; want the registration", at, ok)
+	}
+}
+
+func TestRegistryRemembersWhenChecksWereAdded(t *testing.T) {
+	store := &memStore{pings: map[string]time.Time{}}
+	r, err := New(t.Context(), store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.FirstSeen("cron"); ok {
+		t.Fatal("FirstSeen knows a check that was never registered")
+	}
+	// A registration that cannot be saved does not count, so the next
+	// config load tries again.
+	store.fail = true
+	if err := r.Register(t.Context(), "cron", earlier); err == nil {
+		t.Fatal("Register succeeded although the store failed")
+	}
+	if _, ok := r.FirstSeen("cron"); ok {
+		t.Fatal("an unsaved registration was counted")
+	}
+	store.fail = false
+	for _, at := range []time.Time{earlier, earlier.Add(time.Hour)} { // a reload registers it again
+		if err := r.Register(t.Context(), "cron", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// As after a restart.
+	r, err = New(t.Context(), store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(t.Context(), "cron", earlier.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := r.FirstSeen("cron"); !ok || !at.Equal(earlier) {
+		t.Errorf("FirstSeen = %v, %v; want the first registration, %v", at, ok, earlier)
+	}
+	if _, ok := r.LastPing("cron"); ok {
+		t.Error("a registration counted as a ping")
+	}
+	if err := r.Forget(t.Context(), "cron"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.FirstSeen("cron"); ok || len(store.registered) != 0 {
+		t.Error("Forget kept the registration")
 	}
 }
 

@@ -163,11 +163,16 @@ func TestWatcherReportsMissingFileOnce(t *testing.T) {
 			t.Fatalf("missing file reported %d times, want once", len(ws.rejected))
 		}
 
-		// Restoring the same contents changes nothing that is running.
+		// Restoring the same contents applies them again, which ends the
+		// failure without changing what runs.
 		writeChecks(t, path, "a")
-		settle(pollInterval)
-		if len(ws.applied) != 0 {
-			t.Fatalf("applied %d configs after restoring unchanged contents, want 0", len(ws.applied))
+		settle(5 * pollInterval)
+		if len(ws.applied) != 1 || len(ws.rejected) != 1 {
+			t.Fatalf("after restoring unchanged contents: %d applied, %d rejected; want 1 and 1",
+				len(ws.applied), len(ws.rejected))
+		}
+		if got := strings.Join(checkNames(<-ws.applied), ","); got != "a" {
+			t.Fatalf("applied checks = %s, want a", got)
 		}
 	})
 }

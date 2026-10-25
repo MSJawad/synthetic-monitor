@@ -146,6 +146,19 @@ var migrations = []string{
 	INSERT INTO daily
 		SELECT check_name, started_at - started_at % 86400000 AS day, COUNT(*), SUM(1 - success)
 		FROM results GROUP BY check_name, day;`,
+
+	`-- When probes began succeeding at the end of the check's last incident,
+	-- and when the first probe after that failed, so that a burn rule still
+	-- counting that incident's failures does not open another. A check that
+	-- has recovered keeps its row for this.
+	ALTER TABLE alert_state ADD COLUMN recovered_at INTEGER NOT NULL DEFAULT 0; -- Unix milliseconds, 0 if unset
+	ALTER TABLE alert_state ADD COLUMN failed_again_at INTEGER NOT NULL DEFAULT 0; -- Unix milliseconds, 0 if unset`,
+
+	`-- When each heartbeat check was first configured, so that one never
+	-- pinged is overdue a period and its grace after that, however often the
+	-- monitor restarts. A check configured but not yet pinged has a row with
+	-- a last_ping of 0.
+	ALTER TABLE heartbeats ADD COLUMN registered_at INTEGER NOT NULL DEFAULT 0; -- Unix milliseconds, 0 if unknown`,
 }
 
 // Open opens or creates the database at path, applies pending migrations,

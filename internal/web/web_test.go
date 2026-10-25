@@ -107,6 +107,12 @@ func TestDownSince(t *testing.T) {
 			t.Errorf("Since while failing on and off, last probe ok %t = %q", ok, got)
 		}
 	}
+	// The open incident decides, though one that has ended began later.
+	in.incidents = []store.Incident{{Check: "web", Start: now.Add(-time.Hour), End: now.Add(-50 * time.Minute)},
+		{Check: "web", Start: in.firingSince, Burn: true}}
+	if got := buildCheck(in, now).Since; got != "Failing on and off since Oct 20 09:00 UTC, 30h ago" {
+		t.Errorf("Since while failing on and off after a later incident ended = %q", got)
+	}
 }
 
 func TestHeadline(t *testing.T) {

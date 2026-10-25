@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,6 +88,39 @@ func TestHTTPFollowsRedirects(t *testing.T) {
 	defer srv.Close()
 
 	wantReason(t, run(t, config.Check{HTTP: &config.HTTP{URL: srv.URL + "/old", BodyContains: "moved"}}, Options{}), "")
+}
+
+func TestHTTPWithoutFollowingRedirects(t *testing.T) {
+	var followed atomic.Int32
+	mux := http.NewServeMux()
+	mux.Handle("GET /old", http.RedirectHandler("/new", http.StatusMovedPermanently))
+	mux.HandleFunc("GET /new", func(http.ResponseWriter, *http.Request) { followed.Add(1) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	noFollow := false
+	expect := func(status ...int) config.Check {
+		return config.Check{HTTP: &config.HTTP{URL: srv.URL + "/old", ExpectStatus: status, FollowRedirects: &noFollow}}
+	}
+	wantReason(t, run(t, expect(http.StatusMovedPermanently), Options{}), "")
+	r := run(t, expect(), Options{})
+	wantReason(t, r, ReasonHTTPStatus)
+	if r.Err.Error() != "status 301, want 2xx" {
+		t.Errorf("error = %q, want the redirect's own status", r.Err)
+	}
+	if n := followed.Load(); n != 0 {
+		t.Errorf("the redirect was followed %d times, want never", n)
+	}
+
+	// Each step decides for itself.
+	steps := []config.Step{
+		{Name: "redirect", HTTP: *expect(http.StatusMovedPermanently).HTTP},
+		{Name: "follow", URL: srv.URL + "/old"},
+	}
+	wantReason(t, run(t, config.Check{Steps: steps}, Options{}), "")
+	if n := followed.Load(); n != 1 {
+		t.Errorf("the redirect was followed %d times, want once, by the second step", n)
+	}
 }
 
 func TestHTTPBodyMismatch(t *testing.T) {

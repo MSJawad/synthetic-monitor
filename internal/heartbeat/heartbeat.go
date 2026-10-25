@@ -12,23 +12,29 @@ import (
 	"time"
 )
 
-// Store persists last pings, so a restart does not forget them.
+// Store persists last pings, and when each check was first configured, so
+// a restart does not forget them.
 type Store interface {
 	Heartbeats(ctx context.Context) (map[string]time.Time, error)
 	SaveHeartbeat(ctx context.Context, check string, at time.Time) error
+	HeartbeatRegistrations(ctx context.Context) (map[string]time.Time, error)
+	RegisterHeartbeat(ctx context.Context, check string, at time.Time) error
 	DeleteHeartbeat(ctx context.Context, check string) error
 }
 
-// Registry holds the last ping of each heartbeat check.
+// Registry holds the last ping of each heartbeat check, and when it was
+// first configured.
 type Registry struct {
 	store  Store
 	onPing func(check string, at time.Time)
 	mu     sync.Mutex
 	last   map[string]time.Time
+	seen   map[string]time.Time
 }
 
-// New loads the pings saved in store. onPing, if not nil, is told of each
-// of them and of every ping after, for metrics.
+// New loads the pings saved in store, and when each check was first
+// configured. onPing, if not nil, is told of each ping saved and of every
+// ping after, for metrics.
 func New(ctx context.Context, store Store, onPing func(check string, at time.Time)) (*Registry, error) {
 	last, err := store.Heartbeats(ctx)
 	if err != nil {
@@ -37,13 +43,46 @@ func New(ctx context.Context, store Store, onPing func(check string, at time.Tim
 	if last == nil {
 		last = make(map[string]time.Time)
 	}
+	seen, err := store.HeartbeatRegistrations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if seen == nil {
+		seen = make(map[string]time.Time)
+	}
 	if onPing == nil {
 		onPing = func(string, time.Time) {}
 	}
 	for check, at := range last {
 		onPing(check, at)
 	}
-	return &Registry{store: store, onPing: onPing, last: last}, nil
+	return &Registry{store: store, onPing: onPing, last: last, seen: seen}, nil
+}
+
+// Register records that check is configured, as of at, unless it was
+// already, so a check that is never pinged is overdue a period and its grace
+// after it was first configured, however often the monitor restarts or the
+// check is edited.
+func (r *Registry) Register(ctx context.Context, check string, at time.Time) error {
+	if _, ok := r.FirstSeen(check); ok {
+		return nil
+	}
+	at = at.Truncate(time.Millisecond).UTC()
+	if err := r.store.RegisterHeartbeat(ctx, check, at); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.seen[check] = at
+	r.mu.Unlock()
+	return nil
+}
+
+// FirstSeen returns when check was first configured, if that is known.
+func (r *Registry) FirstSeen(check string) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	at, ok := r.seen[check]
+	return at, ok
 }
 
 // LastPing returns when check was last pinged, if ever.
@@ -70,11 +109,12 @@ func (r *Registry) Ping(ctx context.Context, check string, at time.Time) error {
 	return nil
 }
 
-// Forget removes a check's pings once the check is removed, so a check
-// added later under the same name starts afresh.
+// Forget removes a check's pings and registration once the check is
+// removed, so a check added later under the same name starts afresh.
 func (r *Registry) Forget(ctx context.Context, check string) error {
 	r.mu.Lock()
 	delete(r.last, check)
+	delete(r.seen, check)
 	r.mu.Unlock()
 	return r.store.DeleteHeartbeat(ctx, check)
 }

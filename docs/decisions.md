@@ -37,13 +37,15 @@ same parser and adds a conversion step.
 
 Unknown fields are rejected. A typo such as `timout: 5s` would otherwise be
 silently ignored and the check would run with the default timeout, which is
-the kind of bug that only shows up during an incident. Durations must carry a
-unit (`30s`, not `30`), and every validation problem is reported at once.
+the kind of bug that only shows up during an incident. A second YAML document
+in the file is rejected for the same reason: only the first would be read.
+Durations must carry a unit (`30s`, not `30`), and every validation problem
+is reported at once.
 
-A check's type comes from which block it sets (`http:`, `tcp:`, `dns:` or
-`tls:`) instead of a separate `type:` field, so a type and its settings can
-never disagree. Shared settings use YAML anchors rather than a custom
-`defaults:` section.
+A check's type comes from which block it sets (`http:`, `steps:`, `tcp:`,
+`dns:`, `tls:` or `heartbeat:`) instead of a separate `type:` field, so a
+type and its settings can never disagree. Shared settings use YAML anchors
+rather than a custom `defaults:` section.
 
 The check `name` is its identity: config reloads, metrics, history and alert
 state are all keyed by it.
@@ -57,6 +59,15 @@ connection stayed open, and latency would look better than real users see it.
 The cost is a little more work per probe, which is negligible at monitoring
 rates. `httptrace` splits each probe's time into DNS, connect, TLS, server
 processing and transfer, so a slow probe shows where the time went.
+
+Redirects are followed, as a browser would follow them, including to other
+hosts, and `expect_status` and `body_contains` apply to the final response.
+A check that should see the redirect itself, such as one making sure plain
+HTTP sends visitors to HTTPS, sets `follow_redirects: false` and expects the
+redirect's status. The statuses the client follows (301, 302, 303, 307 and
+308) are rejected in `expect_status` unless it does, since a followed
+redirect never ends in one. Other 3xx codes, such as `304 Not Modified`, are
+not followed and can be expected either way.
 
 ## One wrapper owns timeouts
 
@@ -72,8 +83,10 @@ and is not the target's fault.
 ## One resolver for every probe, released as soon as a probe gives up
 
 All probes resolve names with Go's own DNS client rather than the platform's
-(`PreferGo`). It behaves the same on macOS and in the Linux container, has no
-cache, so every probe sends real queries, and honours the probe's context.
+(`PreferGo`). It behaves the same on macOS and in the Linux container, keeps
+no cache of its own and honours the probe's context. Probes still resolve
+through the system resolver, the nameservers in `resolv.conf`, which may
+cache answers: in Kubernetes that is the cluster DNS.
 
 The goroutine leak tests found one gap: when a probe times out, Go's resolver
 cancels the lookup, but the UDP read in flight is bounded only by its
@@ -231,7 +244,8 @@ on every series, a reload changing a check from TCP to HTTP would leave the
 TCP series behind, frozen at their last value. When a check is removed, its
 series are deleted once its last probe has finished; deleting them at the
 moment of the reload would let that probe recreate them, stale for good.
-Failure reasons are a fixed set of ten, so label cardinality stays bounded.
+Failure reasons are a fixed set of eleven, plus `canceled`, so label
+cardinality stays bounded.
 
 ## One alert per incident: thresholds and a state machine
 
@@ -278,6 +292,15 @@ open until its short window is clean, so the notice can come up to 30
 minutes after the check is healthy again. It says when probes started
 passing, so the real recovery time isn't lost. The burning flag is saved with
 the rest of the alert state, so a restart doesn't end an incident early.
+
+Burn rules are evaluated every 30 seconds, apart from the probe results, so
+an outage short enough to alert and recover between two evaluations is still
+in the rules' windows at the next one. The alert state therefore remembers
+when the check's last incident ended. A burn whose failures all came before
+that is ignored rather than raising a second alert for the same outage; one
+that also counts failures since opens a new incident, which begins at the
+first of them, so incidents never overlap. That memory is saved too, so a
+check that has recovered from an incident keeps its row of alert state.
 
 ## Notifications go through an outbox
 
@@ -332,7 +355,7 @@ Failures are described by reason ("Connection failed", "Timed out").
 
 A few details that are easy to get wrong:
 
-- Availability is rounded *down*, so 99.996% shows as 99.995%, never as 100%.
+- Availability is rounded *down*, so 99.9996% shows as 99.999%, never as 100%.
 - An exhausted error budget is described in probes ("12 failed probes, 1
   allowed"), because a percentage over a short window reads "overspent by
   35966%".
@@ -563,8 +586,11 @@ the alarm, which is exactly what log-based alarms treat as all clear.
 The check is still run by the scheduler on its interval, so heartbeats reuse
 everything else: thresholds, alerting, SLOs, history and the status page,
 where they show when the last ping came instead of a latency. Until the
-first ping, the clock starts when the check does, so a job that never pings
-fails rather than staying grey forever.
+first ping, the clock starts when the check was first configured, so a job
+that never pings fails rather than staying grey forever. That time is saved
+with the pings, so it holds across restarts and edits of the check; counted
+from each start instead, a check would stay green for as long as deploys came
+more often than its period and grace.
 
 - **The ping is saved before it is acknowledged.** A `204` means the ping is
   in SQLite and survives a restart; if it cannot be saved the job gets a

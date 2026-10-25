@@ -107,6 +107,22 @@ type HTTP struct {
 	ExpectStatus []int `yaml:"expect_status"`
 	// BodyContains, if set, must appear in the response body.
 	BodyContains string `yaml:"body_contains"`
+	// FollowRedirects, true unless set to false, follows redirects, even to
+	// other hosts, and checks the final response. False checks the first
+	// response, so a check can expect a redirect status.
+	FollowRedirects *bool `yaml:"follow_redirects"`
+}
+
+// Follows reports whether the request follows redirects.
+func (h *HTTP) Follows() bool {
+	return h.FollowRedirects == nil || *h.FollowRedirects
+}
+
+// followedRedirects are the statuses net/http follows when redirects are
+// followed. Any other 3xx response is returned like any other.
+var followedRedirects = []int{
+	http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+	http.StatusTemporaryRedirect, http.StatusPermanentRedirect,
 }
 
 // MaxSteps limits a multi-step check, which shares one timeout.
@@ -180,8 +196,9 @@ func (c Check) Type() string {
 
 // Parse decodes a config, applies defaults and validates it, looking up
 // the variables that templates refer to in env. Unknown fields are errors,
-// so a misspelt option fails loudly instead of being ignored. All
-// validation problems are reported together.
+// so a misspelt option fails loudly instead of being ignored, and so is a
+// second YAML document, which would be ignored too. All validation
+// problems are reported together.
 func Parse(data []byte, env Env) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -191,6 +208,12 @@ func Parse(data []byte, env Env) (*Config, error) {
 			return nil, errors.New("config is empty")
 		}
 		return nil, err
+	}
+	if err := dec.Decode(new(yaml.Node)); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("config has more than one YAML document: put every check in the first")
 	}
 	for i := range cfg.Checks {
 		cfg.Checks[i].applyDefaults()
@@ -403,8 +426,11 @@ func (h *HTTP) validate(checkVar func(name string) error) []error {
 	}
 	template("body", h.Body)
 	for _, code := range h.ExpectStatus {
-		if code < 100 || code > 599 {
+		switch {
+		case code < 100 || code > 599:
 			fail("expect_status %d is not a valid HTTP status code", code)
+		case h.Follows() && slices.Contains(followedRedirects, code):
+			fail("expect_status %d is a redirect, which is followed: set follow_redirects: false to expect it", code)
 		}
 	}
 	return errs

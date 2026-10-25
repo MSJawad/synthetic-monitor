@@ -45,6 +45,22 @@ func TestAlertStateAndOutboxSurviveRestart(t *testing.T) {
 	}
 }
 
+func TestRecoveryIsRemembered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	s := open(t, path, Options{})
+	recovered := alert.State{RecoveredAt: since.Add(time.Hour), FailedAgainAt: since.Add(2 * time.Hour)}
+	if err := s.SaveAlertState(t.Context(), "web", recovered, nil); err != nil {
+		t.Fatal(err)
+	}
+	closeStore(t, s)
+
+	s = open(t, path, Options{})
+	defer closeStore(t, s)
+	if states, err := s.AlertStates(t.Context()); err != nil || !states["web"].Equal(recovered) {
+		t.Errorf("states = %+v, %v; want web's recovery as saved", states, err)
+	}
+}
+
 func TestHealthyStateDeletesRow(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "history.db"), Options{})
 	defer closeStore(t, s)

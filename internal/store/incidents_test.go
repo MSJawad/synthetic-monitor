@@ -100,11 +100,11 @@ func TestIncidentsSince(t *testing.T) {
 
 	got := incidents(t, s, since.Add(-time.Hour))
 	want := []Incident{
-		{Check: "ended-after", Start: since.Add(-90 * time.Minute), End: since.Add(-30 * time.Minute), Reason: probe.ReasonTimeout},
 		{Check: "open", Start: since.Add(-2 * time.Hour), Reason: probe.ReasonTimeout},
+		{Check: "ended-after", Start: since.Add(-90 * time.Minute), End: since.Add(-30 * time.Minute), Reason: probe.ReasonTimeout},
 	}
 	if !sameIncidents(got, want) {
-		t.Errorf("incidents = %+v, want %+v: those open or ended since, the latest to start first", got, want)
+		t.Errorf("incidents = %+v, want %+v: those open or ended since, the open one first though it started earlier", got, want)
 	}
 }
 
@@ -124,7 +124,7 @@ func TestOpenDeletesOldIncidents(t *testing.T) {
 	for _, in := range incidents(t, s, time.Time{}) {
 		kept = append(kept, in.Check)
 	}
-	if want := []string{"ended-89-days-ago", "open-for-100-days"}; !slices.Equal(kept, want) {
+	if want := []string{"open-for-100-days", "ended-89-days-ago"}; !slices.Equal(kept, want) {
 		t.Errorf("kept %q, want %q: incidents that ended more than %d days ago are deleted, open ones never", kept, want, SummaryDays)
 	}
 }

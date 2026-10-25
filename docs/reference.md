@@ -69,6 +69,7 @@ Per-check series are labelled only with `check`; join on
 | `synthetic_probes_in_flight` | gauge | probes running now |
 | `synthetic_config_reloads_total{result}` | counter | config loads by `success` or `failure` |
 | `synthetic_config_last_reload_successful` | gauge | 0 while a rejected config is being ignored |
+| `synthetic_config_last_reload_success_timestamp_seconds` | gauge | when a config was last loaded or reloaded successfully |
 | `synthetic_history_dropped_results_total` | counter | results not stored because the write queue was full |
 | `synthetic_history_write_errors_total` | counter | failed history writes |
 | `synthetic_alert_firing{check}` | gauge | 1 from the alert until the recovery notice, otherwise 0 |

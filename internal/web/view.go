@@ -48,7 +48,7 @@ func (s state) label() string {
 type pageInput struct {
 	checks []checkInput
 	// incidents are the configured checks' incidents over the days the
-	// page shows, newest first.
+	// page shows: the open ones first, then the rest, each newest first.
 	incidents            []store.Incident
 	incidentsUnavailable bool
 }
@@ -63,7 +63,7 @@ type checkInput struct {
 	lastPing    time.Time
 	pinged      bool             // whether a heartbeat check has been pinged
 	days        []store.Day      // daily totals over the days the page shows
-	incidents   []store.Incident // the check's, newest first
+	incidents   []store.Incident // the check's, ordered as the page's
 	// daysUnavailable is true if the daily totals could not be read.
 	daysUnavailable bool
 }
@@ -73,7 +73,7 @@ type pageView struct {
 	Headline  string
 	Generated string
 	Checks    []checkView
-	Incidents []incidentView // newest first, at most maxIncidents
+	Incidents []incidentView // open ones first, then newest first, at most maxIncidents
 	// MoreIncidents counts the incidents left out of the list.
 	MoreIncidents        int
 	IncidentsUnavailable bool
@@ -229,7 +229,8 @@ func buildCheck(in checkInput, now time.Time) (v checkView) {
 // check that is down burns its error budget too, so whether it burns now
 // doesn't tell.
 func flapping(incidents []store.Incident) bool {
-	return len(incidents) > 0 && incidents[0].End.IsZero() && incidents[0].Burn
+	i := slices.IndexFunc(incidents, func(in store.Incident) bool { return in.End.IsZero() })
+	return i >= 0 && incidents[i].Burn
 }
 
 func buildSLO(s slo.Status, c config.SLO, now time.Time) *sloView {

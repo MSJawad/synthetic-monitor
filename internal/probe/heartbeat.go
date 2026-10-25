@@ -8,9 +8,11 @@ import (
 	"github.com/MSJawad/synthetic-monitor/internal/config"
 )
 
-// Pings reports when heartbeat checks were last pinged.
+// Pings reports when heartbeat checks were last pinged, and when they were
+// first configured.
 type Pings interface {
 	LastPing(check string) (time.Time, bool)
+	FirstSeen(check string) (time.Time, bool)
 }
 
 // heartbeatProber passes while the check's last ping is at most every plus
@@ -19,9 +21,10 @@ type heartbeatProber struct {
 	check        string
 	every, grace time.Duration
 	pings        Pings
-	// since stands in for the last ping until there is one, so a job that
-	// never pings fails once a period and its grace have passed, rather
-	// than never.
+	// When the check was first configured stands in for the last ping
+	// until there is one, so a job that never pings fails once a period
+	// and its grace have passed, rather than never. since, when the prober
+	// was made, stands in for that if it is not known.
 	since time.Time
 }
 
@@ -38,6 +41,11 @@ func (p *heartbeatProber) Probe(context.Context) Result {
 	}
 	if !pinged {
 		last = p.since
+		if p.pings != nil {
+			if seen, ok := p.pings.FirstSeen(p.check); ok {
+				last = seen
+			}
+		}
 	}
 	age := time.Since(last)
 	if age <= p.every+p.grace {
@@ -45,7 +53,7 @@ func (p *heartbeatProber) Probe(context.Context) Result {
 	}
 	expected := fmt.Sprintf("expected every %v plus %v grace", p.every, p.grace)
 	if !pinged {
-		return Result{Reason: ReasonHeartbeatMissed, Err: fmt.Errorf("no ping in the %v since the check started, %s", age.Round(time.Second), expected)}
+		return Result{Reason: ReasonHeartbeatMissed, Err: fmt.Errorf("no ping in the %v since the check was added, %s", age.Round(time.Second), expected)}
 	}
 	return Result{Reason: ReasonHeartbeatMissed, Err: fmt.Errorf("last ping %v ago, %s", age.Round(time.Second), expected)}
 }

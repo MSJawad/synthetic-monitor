@@ -25,8 +25,9 @@ const (
 // Store persists alert state and the outbox of notifications to deliver.
 type Store interface {
 	AlertStates(ctx context.Context) (map[string]State, error)
-	// SaveAlertState stores a check's state, removing it if healthy, and
-	// adds n, if not nil, to the outbox, in one transaction.
+	// SaveAlertState stores a check's state, removing it if there is
+	// nothing to remember, and adds n, if not nil, to the outbox, in one
+	// transaction.
 	SaveAlertState(ctx context.Context, check string, s State, n *Notification) error
 	// PendingNotifications returns undelivered notifications, oldest first.
 	PendingNotifications(ctx context.Context) ([]Notification, error)
@@ -289,6 +290,11 @@ func (m *Manager) evaluateBurns(ctx context.Context, burns map[string]*Burn, at 
 			in.LastReason, in.LastError = f.reason, f.err
 		}
 		next, n := NextBurn(in, check, b, at, t)
+		// A burn that changes nothing must not save the failure filled in
+		// above, or the row would be rewritten on every evaluation.
+		if n == nil && next.Equal(in) {
+			next = prev
+		}
 		m.save(ctx, check, prev, next, n)
 	}
 }

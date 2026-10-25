@@ -109,17 +109,24 @@ func render(n Notification) (title, body, priority, tags string) {
 	switch n.Kind {
 	case KindAlert:
 		if b := n.Burn; b != nil {
-			body = fmt.Sprintf("%d of the %d probes in the last %s failed, the first at %s. "+
-				"That spends the error budget %.0f times as fast as the SLO allows.",
-				b.Failed, b.Total, window(b.Window), stamp(b.Since), b.Rate)
+			body = fmt.Sprintf("%d of the %d probes in the last %s failed", b.Failed, b.Total, window(b.Window))
+			if n.Since.Equal(b.Since) {
+				body += fmt.Sprintf(", the first at %s.", stamp(b.Since))
+			} else {
+				body += fmt.Sprintf("; failing again since %s.", stamp(n.Since))
+			}
+			body += fmt.Sprintf(" That spends the error budget %.0f times as fast as the SLO allows.", b.Rate)
 			if n.Reason != "" {
 				body += fmt.Sprintf("\nLatest failure (%s): %s", n.Reason, n.Error)
 			}
 			return n.Check + " is failing on and off", body, "high", "rotating_light"
 		}
+		failed := fmt.Sprintf("%d probes in a row have failed", n.Probes)
+		if n.Probes == 1 {
+			failed = "1 probe in a row has failed"
+		}
 		return n.Check + " is failing",
-			fmt.Sprintf("%d probes in a row have failed, the first at %s.\nLatest failure (%s): %s",
-				n.Probes, stamp(n.Since), n.Reason, n.Error),
+			fmt.Sprintf("%s, the first at %s.\nLatest failure (%s): %s", failed, stamp(n.Since), n.Reason, n.Error),
 			"high", "rotating_light"
 	case KindRecovery:
 		return n.Check + " recovered",
