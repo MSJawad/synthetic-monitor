@@ -1,5 +1,7 @@
 # synthetic-monitor
 
+[![CI](https://github.com/MSJawad/synthetic-monitor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MSJawad/synthetic-monitor/actions/workflows/ci.yml)
+
 A synthetic monitor I wrote in Go. It checks your services from the outside
 on a schedule, the way a user would, and sends you an alert when something
 breaks and another when it's back. It also tracks uptime against an SLO and
